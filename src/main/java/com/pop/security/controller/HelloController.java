@@ -13,7 +13,6 @@ import org.springframework.web.bind.annotation.GetMapping;
 public class HelloController {
 
     @GetMapping("/index")
-    public String index(){
-        return "index";
-    }
+    public String index(){ return "index"; }
+    
 }
