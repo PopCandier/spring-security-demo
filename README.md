@@ -682,3 +682,146 @@ private void init(UsernamePasswordAuthenticationFilter authFilter, AbstractAuthe
 完整流程的概括。
 
 ![1615733445236](./img/1615733445236.png)
+
+#### 从SpringBoot去理解
+
+前面弄明白了基于xml中的DelegatingFilterProxy来初始化spring-security，接下从springboot中来看看他是如何集成到springboot中去的。
+
+```xml
+<dependency>
+	<groupId>org.springframework.boot</groupId>
+	<artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+```
+
+首先，基于springboot自动状态要整合第三方框架需要在spring.factories，但是奇怪的是自动装配的配置并不在spring-security的`META-INF`包下，而是在spring的autoconfigure包下。
+
+![1615901579501](./img/1615901579501.png)
+
+```properties
+org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration,\
+org.springframework.boot.autoconfigure.security.servlet.SecurityFilterAutoConfiguration,\
+org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration,\
+```
+
+这三个中和DelegatingFilterProxy有关系的是第三个 SecurityFilterAutoConfiguration 所以我们 就直接先来看这个，其他两个我们后面再分析 
+
+```java
+/** *proxyBeanMethods = true 或不写，是Full模式 *proxyBeanMethods = false 是lite模式 * Full模式下通过方法调用指向的仍旧是原来的Bean *Spring 5.2.0+的版本，建议你的配置类均采用Lite模式去做，即显示设置proxyBeanMethods = false。Spring *Boot在2.2.0版本（依赖于Spring 5.2.0）起就把它的所有的自动配置类的此属性改为 了false，即*@Configuration(proxyBeanMethods = false)，提高Spring启动速度 */@Configuration( proxyBeanMethods = false )
+// 当前系统的类型为servlet类型 
+@ConditionalOnWebApplication( type = Type.SERVLET )
+// 放开属性配置 
+@EnableConfigurationProperties({SecurityProperties.class}) /* 当前类加载的条件 */
+@ConditionalOnClass({AbstractSecurityWebApplicationInitializer.class, SessionCreationPolicy.class}) 
+/* 当前类的加载必须是在 SecurityAutoConfiguration 加载完成之后*/
+@AutoConfigureAfter({SecurityAutoConfiguration.class}) 
+public class SecurityFilterAutoConfiguration { 
+    // 默认的过滤器名称 和之前的 web.xml 中个FilterName是一样的 
+    private static final String DEFAULT_FILTER_NAME = "springSecurityFilterChain"; 
+    public SecurityFilterAutoConfiguration() { 
+    }
+    @Bean @ConditionalOnBean(name = {"springSecurityFilterChain"} )
+    public DelegatingFilterProxyRegistrationBean securityFilterChainRegistration(SecurityProperties securityProperties) {
+        DelegatingFilterProxyRegistrationBean registration = new DelegatingFilterProxyRegistrationBean("springSecurityFilterChain", new ServletRegistrationBean[0]);
+        registration.setOrder(securityProperties.getFilter().getOrder());
+        registration.setDispatcherTypes(this.getDispatcherTypes(securityProperties));
+        return registration;
+    }
+```
+
+##### DelegatingFilterProxyRegistrationBean
+
+`DelegatingFilterProxyRegistrationBean`其实是SpringBoot中为我们添加到**Filter到Spring容器中所扩展的一种方式**。
+
+类图如下。
+
+![1615902288573](./img/1615902288573.png)
+
+```java
+@FunctionalInterface
+public interface ServletContextInitializer {
+    void onStartup(ServletContext servletContext) throws ServletException;
+}
+//我们进入其子类RegistrationBean中，并查看他的onStartup方法。
+public final void onStartup(ServletContext servletContext) throws ServletException {
+        String description = this.getDescription();
+        if (!this.isEnabled()) {
+            logger.info(StringUtils.capitalize(description) + " was not registered (disabled)");
+        } else {
+            // 进入
+            this.register(description, servletContext);
+        }
+    }
+
+// DynamicRegistrationBean.java
+protected final void register(String description, ServletContext servletContext) {
+    // 这里会添加对应的过滤器，也就是 DelegatingFilterProxy，我们进去
+        D registration = this.addRegistration(description, servletContext);
+        if (registration == null) {
+            logger.info(StringUtils.capitalize(description) + " was not registered (possibly already registered?)");
+        } else {
+            this.configure(registration);
+        }
+    }
+// AbstractFilterRegistrationBean.java
+ protected Dynamic addRegistration(String description, ServletContext servletContext) {
+     //	进入
+        Filter filter = this.getFilter();
+     // 该过滤器会被添加到servletContext容器中，那么当有满足添加的请求到来的时候就会触发该过滤 器拦截
+        return servletContext.addFilter(this.getOrDeduceName(filter), filter);
+    }
+
+//DelegatingFilterProxyRegistrationBean.java
+public DelegatingFilterProxy getFilter() {
+    // 其实就是将 DelegatingFilterProxy 添加了Servlet的过滤器中
+        return new DelegatingFilterProxy(this.targetBeanName, this.getWebApplicationContext()) {
+            protected void initFilterBean() throws ServletException {
+            }
+        };
+    }
+```
+
+至此，我们知道了其实也就是将DelegatingFilterProxy塞进了Servlet的过滤器列表中，然后我们进入他的下一步配置，看他又做了什么。
+
+```java
+protected final void register(String description, ServletContext servletContext) {
+    // new 了一个DelegatingFilterProxy 进Servlet过滤器列表中
+        D registration = this.addRegistration(description, servletContext);
+        if (registration == null) {
+            logger.info(StringUtils.capitalize(description) + " was not registered (possibly already registered?)");
+        } else {
+            // 注意这个方法我们要进入AbstractFilterRegistrationBean中查看
+            this.configure(registration);
+        }
+    }
+// AbstractFilterRegistrationBean
+protected void configure(Dynamic registration) {
+        super.configure(registration);
+        // ....
+        servletNames.addAll(this.servletNames);
+        if (servletNames.isEmpty() && this.urlPatterns.isEmpty()) {
+            // 如果没有指定对应的servletNames和urlPartterns的话就使用默认的名称和拦截地址 /*
+            registration.addMappingForUrlPatterns(dispatcherTypes, this.matchAfter, DEFAULT_URL_MAPPINGS);
+        } else {
+            if (!servletNames.isEmpty()) {
+                registration.addMappingForServletNames(dispatcherTypes, this.matchAfter, StringUtils.toStringArray(servletNames));
+            }
+
+            if (!this.urlPatterns.isEmpty()) {
+                registration.addMappingForUrlPatterns(dispatcherTypes, this.matchAfter, StringUtils.toStringArray(this.urlPatterns));
+            }
+        }
+
+    }
+// 默认的配置
+public abstract class AbstractFilterRegistrationBean<T extends Filter> extends DynamicRegistrationBean<Dynamic> {
+    private static final String[] DEFAULT_URL_MAPPINGS = new String[]{"/*"};
+    // ....
+}
+```
+
+至此我们看到了在SpringBoot中是通过DelegatingFilterProxyRegistrationBean 帮我们创建了一个 
+
+DelegatingFilterProxy过滤器并且指定了拦截的地址，默认是 /* ,之后的逻辑就和前面介绍的XML中的 
+
+就是一样的了，请求会进入FilterChainProxy中开始处理。
