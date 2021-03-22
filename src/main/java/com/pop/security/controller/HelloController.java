@@ -1,5 +1,6 @@
 package com.pop.security.controller;
 
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.GetMapping;
 
@@ -12,7 +13,10 @@ import org.springframework.web.bind.annotation.GetMapping;
 @Controller
 public class HelloController {
 
+    @PreAuthorize(value = "hasAnyAuthority('ROOT')")
     @GetMapping("/index")
-    public String index(){ return "index"; }
+    public String index(){
+        return "index";
+    }
     
 }

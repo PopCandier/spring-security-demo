@@ -825,3 +825,224 @@ public abstract class AbstractFilterRegistrationBean<T extends Filter> extends D
 DelegatingFilterProxy过滤器并且指定了拦截的地址，默认是 /* ,之后的逻辑就和前面介绍的XML中的 
 
 就是一样的了，请求会进入FilterChainProxy中开始处理。
+
+##### SpringSecurity 的初始化到底经历了什么
+
+我们上面主要是DelegatingFilterProxy，这是xml的主要入口，以及DelegatingFilterProxyRegistratinBean，这是搜springboot的入口。
+
+通过对 第一次请求的流程梳理 我们会有一些疑问就是 FilterChainProxy 是在哪创建的，默认的过滤 
+
+器链和过滤器是怎么来的，这节课我们就详细的来看看在SpringSecurity初始化的时候到底做了哪些事 
+
+情， 
+
+ 基于XML的初始化阶段其实就是各种解析器对标签的解析，过程比较繁琐这里我们就不去分析了，我 
+
+们直接在SpringBoot项目中来分析，在SpringBoot项目中分析SpringSecurity的初始化过程显然我们需 
+
+要从 spring.factories 中的SecurityAutoConfiguration开始 
+
+![1616421975559](./img/1616421975559.png)
+
+``` java
+@Configuration(
+    proxyBeanMethods = false
+)
+@ConditionalOnClass({DefaultAuthenticationEventPublisher.class})
+@EnableConfigurationProperties({SecurityProperties.class})
+@Import({SpringBootWebSecurityConfiguration.class, WebSecurityEnablerConfiguration.class, SecurityDataConfiguration.class})
+public class SecurityAutoConfiguration {
+    public SecurityAutoConfiguration() {
+    }
+	// 定义了一个默认的事件发布器，从类名上来看，应该是一个权限事件发布器
+    // 当容器里没有AuthenticationEventPublisher或者其子类的时候，不装载下面这个类
+    @Bean
+    @ConditionalOnMissingBean({AuthenticationEventPublisher.class})
+    public DefaultAuthenticationEventPublisher authenticationEventPublisher(ApplicationEventPublisher publisher) {
+        return new DefaultAuthenticationEventPublisher(publisher);
+    }
+}
+```
+
+该类引入了 `SpringBootWebSecurityConfiguration` ,`WebSecurityEnablerConfiguration`，`SecurityDataConfiguration` 这三个类，那么我们要分析的话就应该接着来看这三个类
+
+##### SpringBootWebSecurityConfiguration
+
+```java
+@Configuration(
+    proxyBeanMethods = false
+)
+@ConditionalOnDefaultWebSecurity
+@ConditionalOnWebApplication(
+    type = Type.SERVLET
+)
+class SpringBootWebSecurityConfiguration {
+    SpringBootWebSecurityConfiguration() {
+    }
+
+    @Bean
+    @Order(2147483642)
+    static class DefaultCOnfigurerAdapter extends WebSecurityConfigurerAdapter{
+    DefaultConfigurerAdapter(){
+    
+    }
+    }
+}
+```
+
+这个配置的作用是在如果开发者没有自定义 WebSecurityConfigurerAdapter 的话，这里提供一个默认 
+
+的实现。 `@ConditionalOnMissingBean({WebSecurityConfigurerAdapter.class})` 如果有自定义的 
+
+WebSecurityConfigurerAdapter那么这个配置也就不会起作用了 
+
+##### WebSecurityEnablerConfiguration
+
+这个配置是 Spring Security 的核心配置，我们需要重点来分析下。
+
+```java
+@Configuration(
+    proxyBeanMethods = false
+)
+@ConditionalOnMissingBean(
+    name = {"springSecurityFilterChain"}
+)
+@ConditionalOnClass({EnableWebSecurity.class})
+@ConditionalOnWebApplication(
+    type = Type.SERVLET
+)
+@EnableWebSecurity
+class WebSecurityEnablerConfiguration {
+    WebSecurityEnablerConfiguration() {
+    }
+}
+```
+
+我们看到了熟悉`springSecurityFilterChain`，当容器中没有`springSecurityFilterChain`，这个会被装配、的最关键的就是@EnableWebSecurity注解了
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target({ElementType.TYPE})
+@Documented
+@Import({WebSecurityConfiguration.class, SpringWebMvcImportSelector.class, OAuth2ImportSelector.class, HttpSecurityConfiguration.class})
+@EnableGlobalAuthentication
+@Configuration
+public @interface EnableWebSecurity {
+    boolean debug() default false;
+}
+```
+
+在这个接口中我们看到做的事情还是蛮多的，导入了三个类型和一个@EnableGlobalAuthentication 
+
+注解，我们需要重点来看下WebSecurityConfiguration配置类和@EnableGlobalAuthentication注解
+
+##### WebSecurityConfiguration
+
+```java
+ @Bean(name = {"springSecurityFilterChain"})
+    public Filter springSecurityFilterChain() throws Exception {
+        boolean hasConfigurers = this.webSecurityConfigurers != null && !this.webSecurityConfigurers.isEmpty();
+        boolean hasFilterChain = !this.securityFilterChains.isEmpty();
+        Assert.state(!hasConfigurers || !hasFilterChain, "Found WebSecurityConfigurerAdapter as well as SecurityFilterChain. Please select just one.");
+        if (!hasConfigurers && !hasFilterChain) {
+            WebSecurityConfigurerAdapter adapter = (WebSecurityConfigurerAdapter)this.objectObjectPostProcessor.postProcess(new WebSecurityConfigurerAdapter() {
+            });
+            this.webSecurity.apply(adapter);
+        }
+
+        //.....
+			// 这个地方获取的就是 FilterChainProxy，该对象会被保存到IOC容器中，且name为springSecurityFlterChain
+        	// 这里的构建
+            return (Filter)this.webSecurity.build();
+        }
+    }
+
+// 进入到WebSecurity的performBuild
+protected Filter performBuild() throws Exception {
+        int chainSize = this.ignoredRequests.size() + this.securityFilterChainBuilders.size();
+        List<SecurityFilterChain> securityFilterChains = new ArrayList(chainSize);
+        Iterator var3 = this.ignoredRequests.iterator();
+
+        while(var3.hasNext()) {
+            RequestMatcher ignoredRequest = (RequestMatcher)var3.next();
+            securityFilterChains.add(new DefaultSecurityFilterChain(ignoredRequest, new Filter[0]));
+        }
+
+        FilterChainProxy filterChainProxy = new FilterChainProxy(securityFilterChains);
+        if (this.httpFirewall != null) {
+            filterChainProxy.setFirewall(this.httpFirewall);
+        }
+
+        if (this.requestRejectedHandler != null) {
+            filterChainProxy.setRequestRejectedHandler(this.requestRejectedHandler);
+        }
+
+        filterChainProxy.afterPropertiesSet();
+        Filter result = filterChainProxy;
+        if (this.debugEnabled) {
+         // ...
+		// 这里可以看出，确实返回的是FilterChainProxy，具体构造细节，我会在HttpSecurity中详细解说。
+        this.postBuildAction.run();
+        return (Filter)result;
+    }
+```
+
+##### SecurityDataConfiguration
+
+和SpringData有关，现在用到的比较少我们就不去分析它了。
+
+##### UserDetailServiceAutoConfiguration
+
+![1616423652313](./img/1616423652313.png)
+
+其实带有UserService下方的子类，都是和数据打交道的，一般从UserService中获取权限的信息和角色的信息等，而UserService的具体实现和持久化技术息息相关，至于你希望用什么去实现，看具体需求。
+
+```java
+@Configuration(
+    proxyBeanMethods = false
+)
+@ConditionalOnClass({AuthenticationManager.class})
+@ConditionalOnBean({ObjectPostProcessor.class})
+@ConditionalOnMissingBean(
+    value = {AuthenticationManager.class, AuthenticationProvider.class, UserDetailsService.class},
+    type = {"org.springframework.security.oauth2.jwt.JwtDecoder", "org.springframework.security.oauth2.server.resource.introspection.OpaqueTokenIntrospector"}
+)
+public class UserDetailsServiceAutoConfiguration {
+    private static final String NOOP_PASSWORD_PREFIX = "{noop}";
+    private static final Pattern PASSWORD_ALGORITHM_PATTERN = Pattern.compile("^\\{.+}.*$");
+    private static final Log logger = LogFactory.getLog(UserDetailsServiceAutoConfiguration.class);
+
+    public UserDetailsServiceAutoConfiguration() {
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(
+        type = {"org.springframework.security.oauth2.client.registration.ClientRegistrationRepository"}
+    )
+    @Lazy
+    public InMemoryUserDetailsManager inMemoryUserDetailsManager(SecurityProperties properties, ObjectProvider<PasswordEncoder> passwordEncoder) {
+        User user = properties.getUser();
+        List<String> roles = user.getRoles();
+        // 使用内存的方式，存储信息，UserDetail在springSecurity代表用户，后面是密码的生成方式
+        return new InMemoryUserDetailsManager(new UserDetails[]{org.springframework.security.core.userdetails.User.withUsername(user.getName()).password(this.getOrDeducePassword(user, (PasswordEncoder)passwordEncoder.getIfAvailable())).roles(StringUtils.toStringArray(roles)).build()});
+    }
+
+    private String getOrDeducePassword(User user, PasswordEncoder encoder) {
+        String password = user.getPassword();
+        if (user.isPasswordGenerated()) {
+            logger.info(String.format("%n%nUsing generated security password: %s%n", user.getPassword()));
+        }
+
+        return encoder == null && !PASSWORD_ALGORITHM_PATTERN.matcher(password).matches() ? "{noop}" + password : password;
+    }
+}
+
+// SecurityProperties.java
+public static class User {
+        private String name = "user";
+    // uuid生成的密码
+        private String password = UUID.randomUUID().toString();
+        private List<String> roles = new ArrayList();
+```
+
+其实就是生成了一个默认的账号密码配置，你可以通过实现自己的UserDetialService来覆盖系统内部的实现。
