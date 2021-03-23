@@ -1046,3 +1046,449 @@ public static class User {
 ```
 
 其实就是生成了一个默认的账号密码配置，你可以通过实现自己的UserDetialService来覆盖系统内部的实现。
+
+##### 初始化地一些小总结
+
+其实就是通过WebSecurityConfiguration和UserDetailServiceAutoConfiguration来初始化，这两个是比较关键的，前者构造了名字为FilterChainPorxy的过滤器链路，后者构建了一个内存中的初始账号信息供我们验证。
+
+#### 深入理解SecurityConfigurer
+
+在`springsecurity`中，有很多的尾缀带有`configurer`的对象，他也是在Security中一个很重要的组成部分，每一个SecurityConfigurer实现都会从中创建一个Filter对象，也就是我们熟悉的过滤器，并初始化到我们之前说得FilterChainProxy对象中的过滤器列表中。
+
+```java
+public interface SecurityConfigurer<O, B extends SecurityBuilder<O>> {
+    /**
+    初始化的方法
+    */
+    void init(B builder) throws Exception;
+
+    /**
+    配置的方法
+    */
+    void configure(B builder) throws Exception;
+}
+```
+
+这里还有一个对象叫做，SecurityBuilder，这个其实就是我们熟悉的HttpSecurity，他的主要作用就是为了来构建过滤器链的，也是建造者模式的一种体现。
+
+在init方法和configure方法中的形参都是SecurityBuilder类型，而SecurityBuilder是用来构建过滤器链的`DefaultSecurityFilterChainProxy`
+
+![1616503373334](./img/1616503373334.png)
+
+我们可以发现，Configurer的实现其实有很多，我们不妨随便进一个Configurer中看看，子类的实现到底做了什么，以`CsrfConfigurer`为例子。这个过滤器是为了防止跨域攻击的为准备的类
+
+CsrfConfigurer没有实现init方法，同时他的祖父类(父类的父类)`SecurityConfigurerAdapter`也是一个空实现。说明这个类的初始化的时候并没有做什么特别的事情。
+
+但是在configure中做的事情就有了。
+
+```java
+public void configure(H http) {
+    // 这里就很明显了，直接New了一个过滤器，里面传入了跨域攻击的所需要的验证token生成类
+        CsrfFilter filter = new CsrfFilter(this.csrfTokenRepository);
+    // 请求的拦截匹配对象
+        RequestMatcher requireCsrfProtectionMatcher = this.getRequireCsrfProtectionMatcher();
+    // 存在，则进行拦截处理
+        if (requireCsrfProtectionMatcher != null) {
+            filter.setRequireCsrfProtectionMatcher(requireCsrfProtectionMatcher);
+        }
+
+        AccessDeniedHandler accessDeniedHandler = this.createAccessDeniedHandler(http);
+        if (accessDeniedHandler != null) {
+            filter.setAccessDeniedHandler(accessDeniedHandler);
+        }
+		// 获得登出的过滤器，builder中很有很多的Configurer配置信息，可以从这里面取出。
+        LogoutConfigurer<H> logoutConfigurer = (LogoutConfigurer)http.getConfigurer(LogoutConfigurer.class);
+        if (logoutConfigurer != null) {
+            logoutConfigurer.addLogoutHandler(new CsrfLogoutHandler(this.csrfTokenRepository));
+        }
+
+        SessionManagementConfigurer<H> sessionConfigurer = (SessionManagementConfigurer)http.getConfigurer(SessionManagementConfigurer.class);
+        if (sessionConfigurer != null) {
+            sessionConfigurer.addSessionAuthenticationStrategy(this.getSessionAuthenticationStrategy());
+        }
+		// 将过滤器放到 IOC容器中
+        filter = (CsrfFilter)this.postProcess(filter);
+    	// 增加到过滤器链中。
+        http.addFilter(filter);
+    }
+```
+
+大致了解SecurityConfigurer做了什么，我们来看看几个比较关键的实现类。
+
+> SecurityConfigurerAdapter
+>
+> GlobalAuthenticationConfigurerAdapter
+>
+> WebSecurityConfigurer
+
+![1616504285110](./img/1616504285110.png)
+
+##### SecurityConfigurerAdapter
+
+SecurityConfigurerAdapter 实现了 SecurityConfigurer 接口，我们所使用的大部分的 xxxConfigurer 也都是 SecurityConfigurerAdapter 的子类。 SecurityConfigurerAdapter 在 SecurityConfigurer 的基础上，还扩展出来了几个非常好用的方法 
+
+```java
+public abstract class SecurityConfigurerAdapter<O, B extends SecurityBuilder<O>> implements SecurityConfigurer<O, B> {
+    private B securityBuilder;
+    // 一个用于将不受IOC容器管理的对象放入IOC容器的成员。
+    private SecurityConfigurerAdapter.CompositeObjectPostProcessor objectPostProcessor = new SecurityConfigurerAdapter.CompositeObjectPostProcessor();
+
+    public SecurityConfigurerAdapter() {
+    }
+	// 空实现
+    public void init(B builder) throws Exception {
+    }
+	// 空实现
+    public void configure(B builder) throws Exception {
+    }
+	// 链式变成，再次获的建造者对象，即 SecurityBuilder的实现
+    public B and() {
+        return this.getBuilder();
+    }
+
+    protected final B getBuilder() {
+        Assert.state(this.securityBuilder != null, "securityBuilder cannot be null");
+        return this.securityBuilder;
+    }
+
+    protected <T> T postProcess(T object) {
+        return this.objectPostProcessor.postProcess(object);
+    }
+	
+    // 将多个后置处理器集中起来管理，每个后置处理器都可以将不被IOC容器管理的对象，再次管理起来。
+    public void addObjectPostProcessor(ObjectPostProcessor<?> objectPostProcessor) {
+        this.objectPostProcessor.addObjectPostProcessor(objectPostProcessor);
+    }
+
+    public void setBuilder(B builder) {
+        this.securityBuilder = builder;
+    }
+	
+    // 一个聚合的对象后置处理器，如名字一样，他可以将个后置处理器放在一起调用。
+    private static final class CompositeObjectPostProcessor implements ObjectPostProcessor<Object> {
+        private List<ObjectPostProcessor<?>> postProcessors;
+
+        private CompositeObjectPostProcessor() {
+            this.postProcessors = new ArrayList();
+        }
+		// 将已经添加起来的后置处理器，分别调用。
+        public Object postProcess(Object object) {
+            Iterator var2 = this.postProcessors.iterator();
+
+            while(true) {
+                ObjectPostProcessor opp;
+                Class oppType;
+                do {
+                    if (!var2.hasNext()) {
+                        return object;
+                    }
+
+                    opp = (ObjectPostProcessor)var2.next();
+                    Class<?> oppClass = opp.getClass();
+                    oppType = GenericTypeResolver.resolveTypeArgument(oppClass, ObjectPostProcessor.class);
+                } while(oppType != null && !oppType.isAssignableFrom(object.getClass()));
+
+                object = opp.postProcess(object);
+            }
+        }
+
+        private boolean addObjectPostProcessor(ObjectPostProcessor<?> objectPostProcessor) {
+            boolean result = this.postProcessors.add(objectPostProcessor);
+            this.postProcessors.sort(AnnotationAwareOrderComparator.INSTANCE);
+            return result;
+        }
+    }
+}
+```
+
+> CompositeObjectPostProcessor()
+
+首先一开始声明了一个 CompositeObjectPostProcessor 实例，CompositeObjectPostProcessor 是 ObjectPostProcessor 的一个实现，ObjectPostProcessor 本身是一个后置处理器，该后置处 理器默认有两个实现，AutowireBeanFactoryObjectPostProcessor 和  CompositeObjectPostProcessor。其中 AutowireBeanFactoryObjectPostProcessor 主要是利用 了 AutowireCapableBeanFactory 对 Bean 进行手动注册，因为在 Spring Security 中，很多对象 都是手动 new 出来的，这些 new 出来的对象和容器没有任何关系，利用 AutowireCapableBeanFactory 可以将这些手动 new 出来的对象注入到容器中，而 AutowireBeanFactoryObjectPostProcessor 的主要作用就是完成这件事； CompositeObjectPostProcessor 则是一个复合的对象处理器，里边维护了一个 List 集合，这个 List 集合中，大部分情况下只存储一条数据，那就是  AutowireBeanFactoryObjectPostProcessor，用来完成对象注入到容器的操作，如果用户自己手 动调用了 addObjectPostProcessor 方法，那么 CompositeObjectPostProcessor 集合中维护的 数据就会多出来一条，在 CompositeObjectPostProcessor#postProcess 方法中，会遍历集合中 的所有 ObjectPostProcessor，挨个调用其 postProcess 方法对对象进行后置处理。 
+
+> add()
+
+该方法返回值是一个 securityBuilder，securityBuilder 实际上就是 HttpSecurity，我们在  HttpSecurity 中去配置不同的过滤器时，可以使用 and 方法进行链式配置，就是因为这里定义了 and 方法并返回了 securityBuilder 实例这便是 SecurityConfigurerAdapter 的主要功能，后面大部分的 xxxConfigurer 都是基于此类来实现的 。
+
+##### GlobalAuthenticationConfigurerAdapter
+
+```java
+@Order(100)
+public abstract class GlobalAuthenticationConfigurerAdapter implements SecurityConfigurer<AuthenticationManager, AuthenticationManagerBuilder> {
+    public GlobalAuthenticationConfigurerAdapter() {
+    }
+
+    public void init(AuthenticationManagerBuilder auth) throws Exception {
+    }
+
+    public void configure(AuthenticationManagerBuilder auth) throws Exception {
+    }
+}
+```
+
+可以看到，SecurityConfigurer 中的泛型，现在明确成了 AuthenticationManager 和 AuthenticationManagerBuilder。所以 GlobalAuthenticationConfigurerAdapter 的实现类将来主要 是和配置 AuthenticationManager 有关。当然也包括默认的用户名密码也是由它的实现类来进行配置的。我们在 Spring Security 中使用的 AuthenticationManager 其实可以分为两种，一种是局部的，另一种 是全局的，这里主要是全局的配置
+
+##### WebSecurityConfigurer
+
+还有一个实现类就是 WebSecurityConfigurer，这个可能有的小伙伴比较陌生，其实他就是我们天天用的 WebSecurityConfigurerAdapter 的父接口。 所以 WebSecurityConfigurer 的作用就很明确了，用户扩展用户自定义的配置 。
+
+![1616505083962](./img/1616505083962.png)
+
+所以，拥有自定义过滤器，通过SecurityBuilder构造过滤器链，以及配置各种拦截路径，就在继承了WebSecurityConfigurerAdapter成为了可能。
+
+---
+
+让我们把目光回到SecurityConfigurer的第一个实现类，SecurityConfigurerAdapter中，我们来看看下面最重要的三个实现类。其它子类也只不过是他们的三类中的衍生。
+
+* UserDetailAwareConfigurer
+* AbstractHttpConfigurer
+* LdapAuthenticationProviderConfigurer(用的比较少，这里不介绍)
+
+##### UserDetailAwareConfigurer
+
+![1616505470372](./img/1616505470372.png)
+
+**重点**
+
+关于UserDetailService有关的实现类，都于**用户**有关，这个从名字都能知道，主要用途是SpringSecurity将从这些实现类中获取用户信息和权限信息加以验证，说白点就是个**Repository**，我们可以从数据库获得，或者从其他存储了这些信息的地方获得，这是完全可以自定义的。
+
+![1616505701816](./img/1616505701816.png)
+
+##### UserDetailsAwareConfigurer
+
+```java
+public abstract class UserDetailsAwareConfigurer<B extends ProviderManagerBuilder<B>, U extends UserDetailsService> extends SecurityConfigurerAdapter<AuthenticationManager, B> {
+    public UserDetailsAwareConfigurer() {
+    }
+	// 获得一个 UserDetailService的实现
+    public abstract U getUserDetailsService();
+}
+```
+
+从这里开始，预示着用户服务将会与ProviderManager、AuthenticationManager这些权限类有关联，这也不奇怪用户肯定要校验什么的。通过定义我们可以看到泛型U必须是UserDetailsService接口的实现，也就是 getUserDetailsService()方法返回的肯定是UserDetailsService接口的实现，还有通过泛型B及继承 SecurityConfigurerAdapter来看会构建一个AuthenticationManager对象 。
+
+##### AbstractDaoAuthencationConfigurer
+
+```java
+public abstract class AbstractDaoAuthenticationConfigurer<B extends ProviderManagerBuilder<B>, C extends AbstractDaoAuthenticationConfigurer<B, C, U>, U extends UserDetailsService> extends UserDetailsAwareConfigurer<B, U> {
+    // 权限验证类
+    private DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+    private final U userDetailsService;
+	// 将实现类
+    AbstractDaoAuthenticationConfigurer(U userDetailsService) {
+        this.userDetailsService = userDetailsService;
+        this.provider.setUserDetailsService(userDetailsService);
+        if (userDetailsService instanceof UserDetailsPasswordService) {
+            this.provider.setUserDetailsPasswordService((UserDetailsPasswordService)userDetailsService);
+        }
+
+    }
+	// 添加到ioc容器中
+    public C withObjectPostProcessor(ObjectPostProcessor<?> objectPostProcessor) {
+        this.addObjectPostProcessor(objectPostProcessor);
+        return this;
+    }
+	// 密码加密工具
+    public C passwordEncoder(PasswordEncoder passwordEncoder) {
+        this.provider.setPasswordEncoder(passwordEncoder);
+        return this;
+    }
+	// 密码服务
+    public C userDetailsPasswordManager(UserDetailsPasswordService passwordManager) {
+        this.provider.setUserDetailsPasswordService(passwordManager);
+        return this;
+    }
+	//将DaoAuthenticationProvider 添加到IOC容器，且设置进 SecurityBuilder的实现中。
+    public void configure(B builder) throws Exception {
+        this.provider = (DaoAuthenticationProvider)this.postProcess(this.provider);
+        builder.authenticationProvider(this.provider);
+    }
+	// 返回实现类
+    public U getUserDetailsService() {
+        return this.userDetailsService;
+    }
+}
+```
+
+##### UserDetailServiceConfigurer
+
+这个类就比较简单，扩展了AbstractDaoAuthenticationConfigurer中的configure方法，在 configure 方法执行之前加入了 initUserDetailsService 方法，以方便开发展按照自己的方式去初始化 UserDetailsService。不过这里的 initUserDetailsService 方法是空方法 。
+
+```java
+public class UserDetailsServiceConfigurer<B extends ProviderManagerBuilder<B>, C extends UserDetailsServiceConfigurer<B, C, U>, U extends UserDetailsService> extends AbstractDaoAuthenticationConfigurer<B, C, U> {
+    public UserDetailsServiceConfigurer(U userDetailsService) {
+        super(userDetailsService);
+    }
+
+    public void configure(B builder) throws Exception {
+        this.initUserDetailsService();
+        super.configure(builder);
+    }
+	// 给子类开放了一个新的方法，用于重写。
+    protected void initUserDetailsService() throws Exception {
+    }
+}
+```
+
+##### DaoAuthenticationConfigurer
+
+```java
+public class DaoAuthenticationConfigurer<B extends ProviderManagerBuilder<B>, U extends UserDetailsService> extends AbstractDaoAuthenticationConfigurer<B, DaoAuthenticationConfigurer<B, U>, U> {
+    public DaoAuthenticationConfigurer(U userDetailsService) {
+        super(userDetailsService);
+    }
+}
+```
+
+这个类也没干什么，就是细化了`AbstractDaoAuthenticationConfigurer<B, DaoAuthenticationConfigurer<B, U>, U>`。
+
+##### UserDetailsManagerConfigurer
+
+```java
+public class UserDetailsManagerConfigurer<B extends ProviderManagerBuilder<B>, C extends UserDetailsManagerConfigurer<B, C>> extends UserDetailsServiceConfigurer<B, C, UserDetailsManager> {
+    private final List<UserDetailsManagerConfigurer<B, C>.UserDetailsBuilder> userBuilders = new ArrayList();
+    private final List<UserDetails> users = new ArrayList();
+
+    protected UserDetailsManagerConfigurer(UserDetailsManager userDetailsManager) {
+        super(userDetailsManager);
+    }
+	
+    protected void initUserDetailsService() throws Exception {
+        Iterator var1 = this.userBuilders.iterator();
+
+        while(var1.hasNext()) {
+            UserDetailsManagerConfigurer<B, C>.UserDetailsBuilder userBuilder = (UserDetailsManagerConfigurer.UserDetailsBuilder)var1.next();
+            ((UserDetailsManager)this.getUserDetailsService()).createUser(userBuilder.build());
+        }
+
+        var1 = this.users.iterator();
+
+        while(var1.hasNext()) {
+            UserDetails userDetails = (UserDetails)var1.next();
+            ((UserDetailsManager)this.getUserDetailsService()).createUser(userDetails);
+        }
+
+    }
+	// 用来添加用户，将用户管理起来，方便
+    public final C withUser(UserDetails userDetails) {
+        this.users.add(userDetails);
+        return this;
+    }
+	// 利用对象构造器，创建一个对象添加到list中
+    public final C withUser(UserBuilder userBuilder) {
+        this.users.add(userBuilder.build());
+        return this;
+    }
+	// 创建一个对象构建对象，并将利用构造器创建一个指定名字的对象，最后添加进维护的对象建造器列表里
+    public final UserDetailsManagerConfigurer<B, C>.UserDetailsBuilder withUser(String username) {
+        UserDetailsManagerConfigurer<B, C>.UserDetailsBuilder userBuilder = new UserDetailsManagerConfigurer.UserDetailsBuilder(this);
+        userBuilder.username(username);
+        this.userBuilders.add(userBuilder);
+        return userBuilder;
+    }
+	// 自定义了一个用户建造对象
+    public final class UserDetailsBuilder {
+        private UserBuilder user;
+        private final C builder;
+
+        private UserDetailsBuilder(C builder) {
+            this.builder = builder;
+        }
+
+        public C and() {
+            return this.builder;
+        }
+
+        // ...
+
+        UserDetails build() {
+            return this.user.build();
+        }
+    }
+}
+```
+
+UserDetailsManagerConfigurer 中实现了 UserDetailsServiceConfigurer 中定义的  initUserDetailsService 方法，具体的实现逻辑就是将 UserDetailsBuilder 所构建出来的 UserDetails 以及提前准备好的 UserDetails 中的用户存储到 UserDetailsService 中。 该类同时添加了 withUser 方法用来添加用户，同时还增加了一个 UserDetailsBuilder 用来构建用户。
+
+##### JdbcUserDetailsManagerConfigurer
+
+JdbcUserDetailsManagerConfigurer 在父类的基础上补充了 DataSource 对象，同时还提供了相应的数据库查询方法 。
+
+```java
+public class JdbcUserDetailsManagerConfigurer<B extends ProviderManagerBuilder<B>> extends UserDetailsManagerConfigurer<B, JdbcUserDetailsManagerConfigurer<B>> {
+    // 数据源
+    private DataSource dataSource;
+    private List<Resource> initScripts;
+
+    public JdbcUserDetailsManagerConfigurer(JdbcUserDetailsManager manager) {
+        super(manager);
+        this.initScripts = new ArrayList();
+    }
+
+    public JdbcUserDetailsManagerConfigurer() {
+        this(new JdbcUserDetailsManager());
+    }
+	// 数据源的注入
+    public JdbcUserDetailsManagerConfigurer<B> dataSource(DataSource dataSource) {
+        this.dataSource = dataSource;
+        this.getUserDetailsService().setDataSource(dataSource);
+        return this;
+    }
+
+    public JdbcUserDetailsManagerConfigurer<B> usersByUsernameQuery(String query) {
+        this.getUserDetailsService().setUsersByUsernameQuery(query);
+        return this;
+    }
+
+    public JdbcUserDetailsManagerConfigurer<B> authoritiesByUsernameQuery(String query) {
+        this.getUserDetailsService().setAuthoritiesByUsernameQuery(query);
+        return this;
+    }
+ 	// ....   
+}
+```
+
+##### InMemoryUserDetailsManagerConfigurer
+
+```java
+public class InMemoryUserDetailsManagerConfigurer<B extends ProviderManagerBuilder<B>> extends UserDetailsManagerConfigurer<B, InMemoryUserDetailsManagerConfigurer<B>> {
+    public InMemoryUserDetailsManagerConfigurer() {
+        // 也就是意味着他会传入 UserDetailsManagerConfigurer，可是这个UserDetailManager又是什么呢
+        super(new InMemoryUserDetailsManager(new ArrayList()));
+    }
+}
+
+// UserDetailsManagerConfigurer.java
+protected UserDetailsManagerConfigurer(UserDetailsManager userDetailsManager) {
+        super(userDetailsManager);
+}
+```
+
+其实UserDetailManager就是定义了一些关于User用户的操作接口。
+
+```java
+public interface UserDetailsManager extends UserDetailsService {
+    void createUser(UserDetails var1);
+
+    void updateUser(UserDetails var1);
+
+    void deleteUser(String var1);
+
+    void changePassword(String var1, String var2);
+
+    boolean userExists(String var1);
+}
+```
+
+![1616507441936](./img/1616507441936.png)
+
+#### 对 SecurityConigurer的总结
+
+我们可以发现，SecurityConfigurer的下方的子类有三个大类。
+
+![1616508012496](./img/1616508012496.png)
+
+一类是`AbstractHttpConfigurer`，他们最后将会在SecurityBuilder的帮助下，组成了一个个过滤器，并添加到FilterChain中，也就是过滤器链。然后后置处理器将会把他们添加到IOC容器中。
+
+第二类是`UserDetailAwareConfigurer`这一大类主要用途是将权限认证也就是ProviderManager，和用户操作相关的东西放在了一起。
+
+第三类，还没研究，这哪是不用管。  
