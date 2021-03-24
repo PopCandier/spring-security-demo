@@ -1492,3 +1492,428 @@ public interface UserDetailsManager extends UserDetailsService {
 第二类是`UserDetailAwareConfigurer`这一大类主要用途是将权限认证也就是ProviderManager，和用户操作相关的东西放在了一起。
 
 第三类，还没研究，这哪是不用管。  
+
+##### 深入理解 HttpSecurity 
+
+HttpSecurity的最高级抽象，就是SecurityBuilder，他也是SpringSecurity的核心组成部分。
+
+![1616589685138](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1616589685138.png)
+
+##### SecurityBuilder
+
+```java
+public interface SecurityBuilder<O> {
+    O build() throws Exception;
+}
+```
+
+通过接口的源码我们可以看到它的作用其实就是根据传递的泛型构建对应的对象返回。
+
+```java
+public final class HttpSecurity extends AbstractConfiguredSecurityBuilder<DefaultSecurityFilterChain, HttpSecurity> implements SecurityBuilder<DefaultSecurityFilterChain>, HttpSecurityBuilder<HttpSecurity> {
+```
+
+集合HttpSecurity的泛型具体，可知道他会创建出`DefaultSecurityFilterChain`，这就是我们熟悉的过滤器链，所以HttpSecurity的主要用途就是为了构建过滤器链。
+
+##### AbstractSecurityBuilder
+
+```java
+public abstract class AbstractSecurityBuilder<O> implements SecurityBuilder<O> {
+    private AtomicBoolean building = new AtomicBoolean();
+    private O object;
+
+    public AbstractSecurityBuilder() {
+    }
+
+    public final O build() throws Exception {
+        if (this.building.compareAndSet(false, true)) {
+            this.object = this.doBuild();
+            return this.object;
+        } else {
+            throw new AlreadyBuiltException("This object has already been built");
+        }
+    }
+
+    public final O getObject() {
+        if (!this.building.get()) {
+            throw new IllegalStateException("This object has not been built");
+        } else {
+            return this.object;
+        }
+    }
+
+    protected abstract O doBuild() throws Exception;
+}
+```
+
+我们可以看到，build方法其实在AbstractSecurityBuilder中就是做了一个是否已经初始化过的判断，保证只初始化一次。
+
+而后面却调用了doBuild方法，我们来看看他下面的子类是如何实现的。
+
+##### AbstractConfiguredSecurityBuilder
+
+```java
+protected final O doBuild() throws Exception {
+    // 模版模式的体现
+        synchronized(this.configurers) {
+            // 正在初始化
+            this.buildState = AbstractConfiguredSecurityBuilder.BuildState.INITIALIZING;
+            // 初始化之前的调用
+            this.beforeInit();
+            // 初始化
+            this.init();
+            // 配置中
+            this.buildState = AbstractConfiguredSecurityBuilder.BuildState.CONFIGURING;
+            // 配置前的调用
+            this.beforeConfigure();
+            // 配置
+            this.configure();
+            // 构建创建中
+            this.buildState = AbstractConfiguredSecurityBuilder.BuildState.BUILDING;
+            // 获取构建的对象
+            O result = this.performBuild();
+            // 已经构建
+            this.buildState = AbstractConfiguredSecurityBuilder.BuildState.BUILT;
+            return result;
+        }
+}
+```
+
+performBuild()【HttpSecurity中实现】方法的代码如下
+
+![1616590519667](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1616590519667.png)
+
+HttpSecurity的代码实现
+
+```java
+ protected DefaultSecurityFilterChain performBuild() {
+     // 这里对过滤器链进行了排序
+        this.filters.sort(this.comparator);
+     // 对已经创建好的过滤器链和匹配路径对象封装进了DefaultSecurityFilterChain中
+        return new DefaultSecurityFilterChain(this.requestMatcher, this.filters);
+    }
+```
+
+好了SecurityBuilder的接口的功能我们就介绍清楚了，就是用来构建DefaultSecurityFilterChain的。
+
+##### DefaultSecurityFilterChain
+
+DefaultSecurityFilterChain实现了SecurityFilterChain接口，该接口的定义如下。
+
+```java
+public interface SecurityFilterChain {
+    // 匹配请求
+    boolean matches(HttpServletRequest var1);
+	// 获取过滤器链中所有的过滤器
+    List<Filter> getFilters();
+}
+```
+
+SecurityFilterChain 其实就是我们平时所说的 Spring Security 中的过滤器链，它里边定义了两个 方法，一个是 matches 方法用来匹配请求，另外一个 getFilters 方法返回一个 List 集合，集合中放着 Filter 对象，当一个请求到来时，用 matches 方法去比较请求是否和当前链吻合，如果吻合，就返回 getFilters 方法中的过滤器，那么当前请求会逐个经过 List 集合中的过滤器 。
+
+DefaultSecurityFilterChain是SecurityFilterChain 的唯一实现，内容就是对SecurityFilterChain 中 的方法的实现。
+
+```java
+public final class DefaultSecurityFilterChain implements SecurityFilterChain {
+    private static final Log logger = LogFactory.getLog(DefaultSecurityFilterChain.class);
+    private final RequestMatcher requestMatcher;
+    private final List<Filter> filters;
+
+    public DefaultSecurityFilterChain(RequestMatcher requestMatcher, Filter... filters) {
+        this(requestMatcher, Arrays.asList(filters));
+    }
+
+    public DefaultSecurityFilterChain(RequestMatcher requestMatcher, List<Filter> filters) {
+        logger.info(LogMessage.format("Will secure %s with %s", requestMatcher, filters));
+        this.requestMatcher = requestMatcher;
+        this.filters = new ArrayList(filters);
+    }
+
+    public RequestMatcher getRequestMatcher() {
+        return this.requestMatcher;
+    }
+
+    public List<Filter> getFilters() {
+        return this.filters;
+    }
+
+    public boolean matches(HttpServletRequest request) {
+        return this.requestMatcher.matches(request);
+    }
+
+    public String toString() {
+        return this.getClass().getSimpleName() + " [RequestMatcher=" + this.requestMatcher + ", Filters=" + this.filters + "]";
+    }
+}
+```
+
+##### HttpSecurityBuilder
+
+HttpSecurityBuilder 看名字就是用来构建 HttpSecurity 的。不过它也只是一个接口，具体的实现 在 HttpSecurity 中，接口定义如下。
+
+```java
+public interface HttpSecurityBuilder<H extends HttpSecurityBuilder<H>> extends SecurityBuilder<DefaultSecurityFilterChain> {
+    <C extends SecurityConfigurer<DefaultSecurityFilterChain, H>> C getConfigurer(Class<C> var1);
+
+    <C extends SecurityConfigurer<DefaultSecurityFilterChain, H>> C removeConfigurer(Class<C> var1);
+
+    <C> void setSharedObject(Class<C> var1, C var2);
+
+    <C> C getSharedObject(Class<C> var1);
+
+    H authenticationProvider(AuthenticationProvider var1);
+
+    H userDetailsService(UserDetailsService var1) throws Exception;
+
+    H addFilterAfter(Filter var1, Class<? extends Filter> var2);
+
+    H addFilterBefore(Filter var1, Class<? extends Filter> var2);
+
+    H addFilter(Filter var1);
+}
+```
+
+方法的说明
+
+| 方法名称               | 说明                                                         |
+| ---------------------- | ------------------------------------------------------------ |
+| getConfigurer          | 获取一个配置对象。Spring Security 过滤器链中的所有过滤器对象都 是由 xxxConfigure 来进行配置的，这里就是获取这个 xxxConfigure对象 |
+| removeConfigurer       | 移除一个配置对象                                             |
+| setSharedObject        | 配置由多个 SecurityConfigurer 共享的对象。                   |
+| getSharedObject        | 获取由多个 SecurityConfigurer 共享的对象                     |
+| authenticationProvider | 表示配置验证器                                               |
+| userDetailsService     | 配置数据源接口                                               |
+| addFilterAfter         | 在某一个过滤器之前添加过滤器                                 |
+| addFilterBefore        | 在某一个过滤器之后添加过滤器                                 |
+| addFilter              | 添加一个过滤器，该过滤器必须是现有过滤器链中某一个过滤器或者 |
+
+这些接口在HttpSecurity中都有实现。
+
+AbstractSecurityBuilder是SecurityBuilder的唯一实现类，他里面只有一个build方法，此外还开放了一个doBuild方法，给子类用。
+
+AbstractConfigurerSecurityBuilder是AbstractSecurityBuilder的子类。此外AbstractConfiguredSecurityBuilder虽然也是个抽象类，但也开始有一些SecurityBuilder的一些实现。
+
+首先 AbstractConfiguredSecurityBuilder 中定义了一个枚举类，将整个构建过程分为 5 种状态，也可 以理解为构建过程生命周期的五个阶段，如下： 
+
+```java
+private static enum BuildState {
+        // 未构建
+    	UNBUILT(0),
+        // 初始化中
+    	INITIALIZING(1),
+        // 配置中
+    	CONFIGURING(2),
+    	// 构建中
+        BUILDING(3),
+    	// 构建完成
+        BUILT(4);
+
+        private final int order;
+
+        private BuildState(int order) {
+            this.order = order;
+        }
+
+        public boolean isInitializing() {
+            return INITIALIZING.order == this.order;
+        }
+
+        public boolean isConfigured() {
+            return this.order >= CONFIGURING.order;
+        }
+    }
+```
+
+同时我们来看他的成员变量就知道这个类做了什么事情。
+
+```java
+	//用于存储SecurityConfigurer的信息 class类和对应实体的映射关系。
+    private final LinkedHashMap<Class<? extends SecurityConfigurer<O, B>>, List<SecurityConfigurer<O, B>>> configurers;
+	// 在 builder为initing阶段时候添加进来的configuer
+    private final List<SecurityConfigurer<O, B>> configurersAddedInInitializing;
+    // 存储通过addShared的Configurer对象
+	private final Map<Class<?>, Object> sharedObjects;
+    private final boolean allowConfigurersOfSameType;
+	// 改建造者现在的状态
+    private AbstractConfiguredSecurityBuilder.BuildState buildState;
+	// 后置处理器，用于托管对象给IOC容器。    
+	private ObjectPostProcessor<Object> objectPostProcessor;
+```
+
+也就意味着，AbstractConfigurerSecurityBuilder是开始将SecurityConfiguerer和FilterChain放在一起操作的类，通过收集SecurityConfigurer信息，从中构造出FilterChain，最后生成匹配的url对象一起过滤器链封装成一个DefaultSecurityFilterChain对象返回。
+
+我们来看两个方法。
+
+> add 方法
+
+```java
+private <C extends SecurityConfigurer<O, B>> void add(C configurer) {
+    Assert.notNull(configurer, "configurer cannot be null");
+    Class<? extends SecurityConfigurer<O, B>> clazz = configurer.getClass();
+    synchronized(this.configurers) {
+        //当前是否是已经配置过的阶段
+        if (this.buildState.isConfigured()) {
+            throw new IllegalStateException("Cannot apply " + configurer + " to already built object");
+        } else {
+            List<SecurityConfigurer<O, B>> configs = null;
+            //是否允许相同类型地Configurer
+            if (this.allowConfigurersOfSameType) {
+                configs = (List)this.configurers.get(clazz);
+            }
+
+            List<SecurityConfigurer<O, B>> configs = configs != null ? configs : new ArrayList(1);
+            ((List)configs).add(configurer);
+            //class和对象的对象的映射关系
+            this.configurers.put(clazz, configs);
+            if (this.buildState.isInitializing()) {
+                this.configurersAddedInInitializing.add(configurer);
+            }
+
+        }
+    }
+}
+
+// 获取所有的Configurer
+ public <C extends SecurityConfigurer<O, B>> List<C> getConfigurers(Class<C> clazz) {
+        List<C> configs = (List)this.configurers.get(clazz);
+        return configs == null ? new ArrayList() : new ArrayList(configs);
+    }
+```
+
+add 方法，这相当于是在收集所有的配置类。将所有的 xxxConfigure 收集起来存储到 configurers  中，将来再统一初始化并配置，configurers 本身是一个 LinkedHashMap ，key 是配置类的 class， value 是一个集合，集合里边放着 xxxConfigure 配置类。当需要对这些配置类进行集中配置的时候， 会通过 getConfigurers 方法获取配置类，这个获取过程就是把 LinkedHashMap 中的 value 拿出来， 放到一个集合中返回 。
+
+> doBuild 方法
+
+```java
+protected final O doBuild() throws Exception {
+        synchronized(this.configurers) {
+            this.buildState = AbstractConfiguredSecurityBuilder.BuildState.INITIALIZING;
+            this.beforeInit();
+            this.init();
+            this.buildState = AbstractConfiguredSecurityBuilder.BuildState.CONFIGURING;
+            this.beforeConfigure();
+            this.configure();
+            this.buildState = AbstractConfiguredSecurityBuilder.BuildState.BUILDING;
+            O result = this.performBuild();
+            this.buildState = AbstractConfiguredSecurityBuilder.BuildState.BUILT;
+            return result;
+        }
+    }
+// 依次调用收集到的Configurer类，迭代调用
+private void init() throws Exception {
+        Collection<SecurityConfigurer<O, B>> configurers = this.getConfigurers();
+        Iterator var2 = configurers.iterator();
+
+        SecurityConfigurer configurer;
+        while(var2.hasNext()) {
+            configurer = (SecurityConfigurer)var2.next();
+            configurer.init(this);
+        }
+
+        var2 = this.configurersAddedInInitializing.iterator();
+
+        while(var2.hasNext()) {
+            configurer = (SecurityConfigurer)var2.next();
+            configurer.init(this);
+        }
+
+    }
+	// 依次调用收集到的Configurer类，迭代调用
+    private void configure() throws Exception {
+        Collection<SecurityConfigurer<O, B>> configurers = this.getConfigurers();
+        Iterator var2 = configurers.iterator();
+
+        while(var2.hasNext()) {
+            SecurityConfigurer<O, B> configurer = (SecurityConfigurer)var2.next();
+            configurer.configure(this);
+        }
+
+    }
+```
+
+在 AbstractSecurityBuilder 类中，过滤器的构建被转移到 doBuild 方法上面了，不过在  AbstractSecurityBuilder 中只是定义了抽象的 doBuild 方法，具体的实现在  AbstractConfiguredSecurityBuilder doBuild 方法就是一边更新状态，进行进行初始化。
+
+其中调用方法的说明
+
+| 方法              | 说明                                                         |
+| ----------------- | ------------------------------------------------------------ |
+| beforeInit()      | 是一个预留方法，没有任何实现                                 |
+| init()            | 就是找到所有的 xxxConfigure，挨个调用其 init 方法进行初始化  |
+| beforeConfigure() | 是一个预留方法，没有任何实现                                 |
+| configure()       | 就是找到所有的 xxxConfigure，挨个调用其 configure 方法进行配置。 |
+| performBuild()    | 是真正的过滤器链构建方法，但是在 AbstractConfiguredSecurityBuilder 中 performBuild 方法只是一个抽象方法，具体的实现在 HttpSecurity 中 |
+
+HttpSecurity的所有的父类我们都了解后就可以具体来看下HttpSecurity的内容了。
+
+##### HttpSecurity
+
+![1616592762371](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1616592762371.png)
+
+HttpSecurity 中有大量类似的方法，过滤器链中的过滤器就是这样一个一个配置的。我们就不一一介绍 
+
+了。 每个配置方法的结尾都会来一句 getOrApply，这个是干嘛的？我们来看下。
+
+![1616592848362](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1616592848362.png)
+
+
+
+```java
+// HttpSecurity.java 
+private <C extends SecurityConfigurerAdapter<DefaultSecurityFilterChain, HttpSecurity>> C getOrApply(C configurer) throws Exception {
+        C existingConfig = (SecurityConfigurerAdapter)this.getConfigurer(configurer.getClass());
+        return existingConfig != null ? existingConfig : this.apply(configurer);
+    }
+
+//AbstractConfiguredSecurityBuilder.java
+public <C extends SecurityConfigurerAdapter<O, B>> C apply(C configurer) throws Exception {
+        configurer.addObjectPostProcessor(this.objectPostProcessor);
+        configurer.setBuilder(this);
+        this.add(configurer);
+        return configurer;
+}
+// 将配置类收集起来。
+private <C extends SecurityConfigurer<O, B>> void add(C configurer) {
+        Assert.notNull(configurer, "configurer cannot be null");
+        Class<? extends SecurityConfigurer<O, B>> clazz = configurer.getClass();
+        synchronized(this.configurers) {
+            if (this.buildState.isConfigured()) {
+                throw new IllegalStateException("Cannot apply " + configurer + " to already built object");
+            } else {
+                List<SecurityConfigurer<O, B>> configs = null;
+                if (this.allowConfigurersOfSameType) {
+                    configs = (List)this.configurers.get(clazz);
+                }
+
+                List<SecurityConfigurer<O, B>> configs = configs != null ? configs : new ArrayList(1);
+                ((List)configs).add(configurer);
+                this.configurers.put(clazz, configs);
+                if (this.buildState.isInitializing()) {
+                    this.configurersAddedInInitializing.add(configurer);
+                }
+
+            }
+        }
+    }
+```
+
+getConfigurer 方法是在它的父类 AbstractConfiguredSecurityBuilder 中定义的，目的就是去查看当前 这个 xxxConfigurer 是否已经配置过了。 如果当前 xxxConfigurer 已经配置过了，则直接返回，否则调用 apply 方法，这个 apply 方法最终会调 用到 AbstractConfiguredSecurityBuilder#add 方法，将当前配置 configurer 收集起来。
+
+> addFilter 方法
+
+```java
+public HttpSecurity addFilter(Filter filter) {
+    Class<? extends Filter> filterClass = filter.getClass();
+    // 是否注册过
+    if (!this.comparator.isRegistered(filterClass)) {
+        throw new IllegalArgumentException("The Filter class " + filterClass.getName() + " does not have a registered order and cannot be added without a specified order. Consider using addFilterBefore or addFilterAfter instead.");
+    } else {
+        //很简单粗暴，就是添加到过滤器链中
+        this.filters.add(filter);
+        return this;
+    }
+}
+```
+
+##### 总结HttpSecurity
+
+其实HttpSecurity的真正目的就是为了构建DefaultSecurityFilterChain，也就是过滤器链。那么为了能够创建出这个链，我们需要收集一些Configurer，也就是SecurityConfigurer下的AbstractHttpConfigurer锁衍生出来的实现类，他们用于创建不同的过滤器链，在由于SecurityBuilder也定义了一套收集Configurer，调用他们的init和configre的方法，使得他们能够依次被初始化成功，最后利用传入的SecurityBuilder，也就是HttpSecuirty将构造好的Filter添加到链表中，最后和配置好的请求，封装成链表返回。
