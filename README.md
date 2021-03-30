@@ -1497,7 +1497,7 @@ public interface UserDetailsManager extends UserDetailsService {
 
 HttpSecurity的最高级抽象，就是SecurityBuilder，他也是SpringSecurity的核心组成部分。
 
-![1616589685138](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1616589685138.png)
+![1616589685138](./img/1616589685138.png)
 
 ##### SecurityBuilder
 
@@ -1581,7 +1581,7 @@ protected final O doBuild() throws Exception {
 
 performBuild()【HttpSecurity中实现】方法的代码如下
 
-![1616590519667](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1616590519667.png)
+![1616590519667](./img/1616590519667.png)
 
 HttpSecurity的代码实现
 
@@ -1847,13 +1847,13 @@ HttpSecurity的所有的父类我们都了解后就可以具体来看下HttpSecu
 
 ##### HttpSecurity
 
-![1616592762371](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1616592762371.png)
+![1616592762371](./img/1616592762371.png)
 
 HttpSecurity 中有大量类似的方法，过滤器链中的过滤器就是这样一个一个配置的。我们就不一一介绍 
 
 了。 每个配置方法的结尾都会来一句 getOrApply，这个是干嘛的？我们来看下。
 
-![1616592848362](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1616592848362.png)
+![1616592848362](./img/1616592848362.png)
 
 
 
@@ -1917,3 +1917,830 @@ public HttpSecurity addFilter(Filter filter) {
 ##### 总结HttpSecurity
 
 其实HttpSecurity的真正目的就是为了构建DefaultSecurityFilterChain，也就是过滤器链。那么为了能够创建出这个链，我们需要收集一些Configurer，也就是SecurityConfigurer下的AbstractHttpConfigurer锁衍生出来的实现类，他们用于创建不同的过滤器链，在由于SecurityBuilder也定义了一套收集Configurer，调用他们的init和configre的方法，使得他们能够依次被初始化成功，最后利用传入的SecurityBuilder，也就是HttpSecuirty将构造好的Filter添加到链表中，最后和配置好的请求，封装成链表返回。
+
+
+
+##### 默认的登录流程
+
+通过之前的流程我们知道，第一次的请求web项目的时候会判断你这个请求是否是不需要授权的请求，如果是不需要授权，就会放行，否则就会进行重定向到权限认证页面。在后台生成了页面返回到浏览器后，我们需要输入账号密码，这之后的请求又是什么样的流程呢。
+
+首先我们确定的是，这个处理也是在过滤器中的处理的，那么我们更加前面的知道，一个过滤器对应了一个`Configurer`，那么我们来到这里的`FromLoginConfigurer`
+
+![image-20210329134817863](./img/image-20210329134817863.png)
+
+这里很明显，他创建一个`UsernamePasswordAuthenticationFilter`，也符合我们一个`Configurer`对应一个过滤器的结论。
+
+确实这个过滤器也出现在我们的`FilterChainProxy`中。
+
+![image-20210329135747440](./img/image-20210329135747440.png)
+
+看看configurer对应的init方法干了什么。
+
+![image-20210329135842875](./img/image-20210329135842875.png)
+
+```java
+private void initDefaultLoginFilter(H http) { DefaultLoginPageGeneratingFilter loginPageGeneratingFilter = http .getSharedObject(DefaultLoginPageGeneratingFilter.class); 
+if (loginPageGeneratingFilter != null && !isCustomLoginPage()) { 
+// 都是一些配置的设置
+loginPageGeneratingFilter.setFormLoginEnabled(true); loginPageGeneratingFilter.setUsernameParameter(getUsernameParameter()); loginPageGeneratingFilter.setPasswordParameter(getPasswordParameter()); 
+ // 设置认证页面的地址 
+loginPageGeneratingFilter.setLoginPageUrl(getLoginPage()); loginPageGeneratingFilter.setFailureUrl(getFailureUrl()); 
+// 设置默认页面提交表单的地址 
+loginPageGeneratingFilter.setAuthenticationUrl(getLoginProcessingUrl()); 
+} 
+}
+```
+
+对应的父类的实现为
+
+![image-20210329140536206](./img/image-20210329140536206.png)
+
+这里有设置默认的实现登录接口路径`/login`。
+
+##### 默认的认证流程
+
+当我们提交登陆表单后该请求会被 `UsernamePasswordAuthenticationFilter` 过滤器处理。`doFilter`方法在`UsernamePasswordAuthenticationFilter` 的**父类**中首先如果不是需要认证的请求就直接放过了，如果是需要认证的方法就会调用子类中的`attemptAuthentication`方法来处理。
+
+```java
+public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) throws IOException, ServletException { 
+    HttpServletRequest request = (HttpServletRequest)req; 
+    HttpServletResponse response = (HttpServletResponse)res; 
+    // 如果不是需要认证的请求 直接放过 
+    if (!this.requiresAuthentication(request, response)) { 
+        chain.doFilter(request, response); 
+    } else 
+    { 	if (this.logger.isDebugEnabled()) { 
+        this.logger.debug("Request is to process authentication"); 
+    }
+     Authentication authResult; 
+     try {
+         // 调用子类认证的方法 进入
+         attemptAuthenticatio 方法 authResult = 
+             this.attemptAuthentication(request, response); 
+         if (authResult == null) { 
+             return; 
+         }// session的处理策略 
+         this.sessionStrategy.onAuthentication(authResult, request, response);
+     } catch (InternalAuthenticationServiceException var8) { 
+         this.logger.error("An internal error occurred while trying to authenticate the user.", var8); 
+         // 验证失败的处理方法
+         this.unsuccessfulAuthentication(request, response, var8); 
+         return; 
+     } catch (AuthenticationException var9) { 
+         this.unsuccessfulAuthentication(request, response, var9); 
+         return; 
+     }
+     //验证成功前的操作
+     if (this.continueChainBeforeSuccessfulAuthentication) { 
+         chain.doFilter(request, response); 
+     }
+     //都成功后的处理
+     this.successfulAuthentication(request, response, chain, authResult); 
+    } 
+}
+```
+
+进入`UsernamePasswordAuthenticationFilter`中的`attemptAuthentication`方法
+
+```java
+public Authentication attemptAuthentication(HttpServletRequest request, HttpServletResponse response) throws AuthenticationException { 
+    // 表单提交的方式必须是POST方式 
+    if (this.postOnly && !request.getMethod().equals("POST")) {
+			throw new AuthenticationServiceException("Authentication method not supported: " + request.getMethod()); 
+    } else 
+    { 
+        // 获取表单提交的账号密码 
+        String username = this.obtainUsername(request); 
+        String password = this.obtainPassword(request); 
+        if (username == null) { 
+            username = ""; 
+        }
+        if (password == null) { 
+            password = ""; 
+        }
+        username = username.trim(); 
+        // 表单提交的账号密码被封装为 Token对象 
+        UsernamePasswordAuthenticationToken authRequest = new UsernamePasswordAuthenticationToken(username, password); 
+        // 将当前Request和Token关联起来 
+        this.setDetails(request, authRequest); 
+        // 实现认证的过程 进入这里，这里进入的其实是ProviderManager
+        return this.getAuthenticationManager().authenticate(authRequest); 
+    } 
+}
+```
+
+authenticate认证的方法我们需要进入到`ProviderManager`中获取对应的验证方式，`ProviderManager`是`AuthenticationManager`的实现类，主要的用途是处理认证的请求。
+
+![image-20210329142940568](./img/image-20210329142940568.png)
+
+```java
+public Authentication authenticate(Authentication authentication) throws AuthenticationException { 
+    Class<? extends Authentication> toTest = authentication.getClass(); 		      		AuthenticationException lastException = null; 
+    AuthenticationException parentException = null; 
+    Authentication result = null; 
+    Authentication parentResult = null; 
+    boolean debug = logger.isDebugEnabled(); 
+    // 获取各种认证方式 QQ 微信 数据库 
+    Iterator var8 = this.getProviders().iterator(); 
+    while(var8.hasNext()) { 
+        //迭代，获得校验提供者
+        AuthenticationProvider provider = (AuthenticationProvider)var8.next(); 
+        //是否支持这个校验
+        if (provider.supports(toTest)) { 
+            if (debug) { 
+                logger.debug("Authentication attempt using " + provider.getClass().getName()); 
+            }try {
+                // 认证的关键代码 
+                result = provider.authenticate(authentication);
+				if (result != null) { 
+                    this.copyDetails(authentication, result); 
+                    break; 
+                } 
+            } catch (AccountStatusException var13) { 
+                this.prepareException(var13, authentication); 
+                throw var13; 
+            } catch (InternalAuthenticationServiceException var14) { 		                             this.prepareException(var14, authentication); 
+                throw var14; 
+            } catch (AuthenticationException var15) { 
+                lastException = var15; 
+            } 
+        } 
+    }
+    if (result == null && this.parent != null) { 
+        try {
+            // 父认证器 再认证一次 
+            result = parentResult = this.parent.authenticate(authentication); 
+        } catch (ProviderNotFoundException var11) {
+        } catch (AuthenticationException var12) { 
+            parentException = var12; lastException = var12; 
+        } 
+    }
+    if (result != null) { 
+        if (this.eraseCredentialsAfterAuthentication && result instanceof CredentialsContainer) 
+        { 
+            ((CredentialsContainer)result).eraseCredentials(); }
+        if (parentResult == null) { 	                this.eventPublisher.publishAuthenticationSuccess(result); 
+        }return result; 
+    } 
+    else { 
+        if (lastException == null) { 
+            lastException = new ProviderNotFoundException(this.messages.getMessage("ProviderManager.providerNotF ound", new Object[]{toTest.getName()}, "No AuthenticationProvider found for {0}")); 
+        }if (parentException == null) { this.prepareException((AuthenticationException)lastException, authentication); 
+        }throw lastException;
+    } 
+}
+```
+
+进入`provider.authenticate(authentication);`方法中 `AbstractUserDetailsAuthenticationProvider`具体实现。
+
+![image-20210329144027556](./img/image-20210329144027556.png)
+
+```java
+public Authentication authenticate(Authentication authentication) throws AuthenticationException { 
+    Assert.isInstanceOf(UsernamePasswordAuthenticationToken.class, authentication, () -> { 
+        return this.messages.getMessage("AbstractUserDetailsAuthenticationProvider.onlySupports ", "Only UsernamePasswordAuthenticationToken is supported"); 
+    }); 
+    // 获取表单提交的账号 
+    String username = authentication.getPrincipal() == null ? "NONE_PROVIDED" : authentication.getName(); boolean cacheWasUsed = true; 
+    // 从缓存中认证账号是否存在 
+    UserDetails user = this.userCache.getUserFromCache(username); 
+    if (user == null) { 
+        cacheWasUsed = false; 
+     try {
+         // 缓存中不存在要验证的账号 直接验证 
+         user = this.retrieveUser(username, (UsernamePasswordAuthenticationToken)authentication); 
+     } catch (UsernameNotFoundException var6) { 
+         this.logger.debug("User '" + username + "' not found"); if (this.hideUserNotFoundExceptions) 
+         { 
+             throw new BadCredentialsException(
+                 this.messages.getMessage("AbstractUserDetailsAuthenticat ionProvider.badCredentials", "Bad credentials")
+             ); 
+         }throw var6;
+     }
+        Assert.notNull(user, "retrieveUser returned null - a violation of the interface contract"); 
+    }try 
+    {
+     // 验证前，先判断判断这个用户是不是session超时，或者是锁定的状态，
+     this.preAuthenticationChecks.check(user); 
+      // 密码是否正确
+     this.additionalAuthenticationChecks(user, (UsernamePasswordAuthenticationToken)authentication); 
+    } catch (AuthenticationException var7) 
+    { 
+        if (!cacheWasUsed) 
+        { 	
+            throw var7; 
+    	}
+
+		cacheWasUsed = false; 
+        // 由于上面没有缓存，所以这个会去查询，通过用户账号
+        user = this.retrieveUser(username, (UsernamePasswordAuthenticationToken)authentication); 
+        // 和上面一样
+        this.preAuthenticationChecks.check(user); 
+        // 和上面一样
+  this.additionalAuthenticationChecks(user, (UsernamePasswordAuthenticationToken)authentication); }
+    this.postAuthenticationChecks.check(user); 
+    if (!cacheWasUsed) 
+    { 
+        //放进缓存
+        this.userCache.putUserInCache(user); 
+    }
+    Object principalToReturn = user; 
+    if (this.forcePrincipalAsString) { 
+        principalToReturn = user.getUsername(); 
+    }
+    // 返回验证成功的信息。
+    return this.createSuccessAuthentication(principalToReturn, authentication, user); 
+}
+```
+
+所以这一步，也还是没到验证的步骤，进入`retrieveUser`方法
+
+![image-20210329150515940](./img/image-20210329150515940.png)
+
+```java
+protected final UserDetails retrieveUser(
+    String username, UsernamePasswordAuthenticationToken authentication) throws AuthenticationException { 
+    this.prepareTimingAttackProtection(); 
+    try {
+        // 账号验证 
+        // 其实一切的验证还是回到了UserDetialService 这个用户数据中心这里。
+        UserDetails loadedUser = this.getUserDetailsService().loadUserByUsername(username); 
+        //账号不存在就报错
+        if (loadedUser == null) { 
+            throw new InternalAuthenticationServiceException("UserDetailsService returned null, which is an interface contract violation"); 
+        } 
+        else 
+        { 
+            // 存在就直接返回。
+            return loadedUser; 
+        } 
+    } catch (UsernameNotFoundException var4) 
+    { 	 
+        //用户名不存在也报错
+        this.mitigateAgainstTimingAttack(authentication);
+		throw var4; 
+    } 
+    catch (InternalAuthenticationServiceException var5) { 
+        throw var5; 
+    } catch (Exception var6) { 
+        throw new InternalAuthenticationServiceException(var6.getMessage(), var6);
+    } 
+}
+```
+
+我们在这里可以看到，这里最后开始调用UserDetailService接口里的方法，尝试从用户数据中心那里获得用户信息，如果你没有实现自己的UserDetailService话，springsecurity会有一个自己的默认实现，就是InMemoryUserDetailsManager中的实现，有一个默认的用户名和密码。如果你实现了自己的，这个对象就不会被注入。
+
+![image-20210329151220711](./img/image-20210329151220711.png)
+
+我们看看InMemoryUserDetailsManager中的loadUserByUsername的实现
+
+![image-20210329151512687](./img/image-20210329151512687.png)
+
+这里的用户名密码，你可以通过外部的配置的yml文件配置，也有默认的，之前看过了，用户名是user，密码是一串随机生成的uuid。这里就是如他名字一样，直接在内存中校验了。
+
+##### 密码校验
+
+我们通过上面那一步，通过用户名获得了账号信息，接着就要看看密码是否匹配。这是在用户已经查询到的情况下。所以让我们跳出来。接着走完校验流程。
+
+![image-20210329152236915](./img/image-20210329152236915.png)
+
+![image-20210329152513718](./img/image-20210329152513718.png)
+
+接着，我们通过代码调试，发现这个获得的`passwordEncoder`的实现类是`DelegatingPasswordEncoder`
+
+![image-20210329152700304](./img/image-20210329152700304.png)
+
+当然，关于密码的encoder也有很多种实现，例如我们可以在加入密码的时候，在密码的前面设置`{noop}`前缀，代表对密码不进行加密校验。所以也会获得不用加密的密码加密工具。就像是下面这样。
+
+![image-20210329152914615](./img/image-20210329152914615.png)
+
+这其实就是一些映射，也就意味着你可以在你的密码前面加上这些前缀来获得不同的加密工具，来对你的密码进行校验，不过这个你必须保证，你注册账号所加密的密码，和这里解密的密码工具是一致的才行。
+
+也就意味着你可以这样写密码。
+
+```
+{noop}123    NoOpPasswrodEncoder
+{SHA-1}123	 MessageDigestPasswordEncoder
+....
+```
+
+![image-20210329153125602](./img/image-20210329153125602.png)
+
+这里也就是一个简单的密码判断。判断字符是否相同。
+
+![image-20210329153153082](./img/image-20210329153153082.png)
+
+##### 关于登录和校验流程的总结
+
+在重定向登录页面，我们输入用户名密码后，会被`UserPasswordAuthenticationFilter`过滤器拦截下来。`UserPasswordAuthenticationFilter`是从`LoginFormConfigurer`中创建出来的。接着在父类`AbstractAuthencationFilterConfigurer`指定了登录路径为`/login`路径，作为拦截匹配对象。
+
+接着，进入`UserPasswordAuthenticationFilter`的`doFilter`方法进行校验，然后一直往下走，我们发现了一个新的类叫做`AuthenticationManager`这个对象中就是个验证管理中心，里面持有了一个`UserDetailService`的引用。主要从里面来获得对象处理，然后封装成Authentication对象返回。然后再后续的步骤中，就是校验取出的用户是否锁定，是否session过期之类的。最后都没问题开始密码校验。
+
+关于密码校验，就是通过不同的前缀来找到不同的密码加密器，也就是`PasswordEncoder`来和取出的密码进行简单的比对。最后全部完成后，会将用户信息存入缓存。放行。
+
+
+
+#### 应用篇
+
+关键在于我们如何将`springsecurity`组合到我们的项目中去，除了之前的映入jar的操作，无非就是和`shiro`一样可以需要自己配置权限的来源，和用户的来源之类的，以及记住我等配置。
+
+一开始，我们可以通过修改默认的配置，也就是在`application.properties`里面修改默认的用户名和密码，接着你也可以在新建一个`SpringSecurity`的配置类，里覆盖里面的配置。
+
+```java
+@Configuration
+public class SpringSecurityConfig extends WebSecurityConfigurerAdapter{
+	
+    /**
+    自定义权限认证器，此方法来自于 GlobalAuthenticationConfigurerAdapter 也就是
+    SecurityConfigurer的子类，用来构建和认证权限相关的配置
+    **/
+    @Overriede
+    protected void configure(AuthenticationManagerBuildr auth) throws Exception
+    {
+        //这里我们调用默认的内存权限认证，随便设置几个值
+        auth.inMemoryAuthentication().withUser("pop").password("{noop}123")//不加密
+            .roles("USER");//随便赋予了一个权限字符
+    }
+    
+    /**
+    自定义过滤器连，这个来自于securityBuilder，用来构造自己过滤器链
+    */
+    protected void configure(HttpSecurity http) throws Exception{
+        super.configure(http);//保持原样
+    }
+    
+}
+```
+
+##### 自定义用户中心
+
+以上是默认的流程，默认情况下通过`InMemoryUserDetailManager`来实现，而`InMemoryUserDetailsManager`实现了`UserDetailService`接口，那么我们要实现自定义的认证流程也只需要实现`UserDetailService`接口，重写`loadUserByUsername`方法，然后将这个我们自定义的实现，塞进到这个`InMemoryUserDetailManager`即可。
+
+```java
+public interface UserService extends UserDetailsService{
+    //....
+}
+
+@Service
+public class UserServiceImpl implements UserService {
+    
+    /*
+     通过用户名查找用户
+    */
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException{
+        
+        // 一段从数据库，或者内存中，通过用户名或者UserDetails的代码
+        // ....
+        // 结束...  UserDetail是Security自己定义的对象实体，按照规范返回即可。
+        
+        //保存权限的集合，其实就是一串封装起来的代表权限的字符串
+        List<SimpleGrantedAuthority> list = new ArrayList<>();
+        // 这里也建议从 数据库或者内存中获取权限的代码，然后封装返回
+        list.add(new SimpleGantedAuthority("USER"));
+        //这里是简单的校验
+        if(!"lisi".equals(username))
+        {
+            return null;
+        }
+        //将用户名和密码，权限封装起来
+        UserDetail user = new User("lisi","{noop}123",list);
+        return user;
+    }
+    
+}
+```
+
+以上定义好了，也就意味着我们自定义了自己的用户校验规则，接着将他注入到权限管理器中。
+
+```java
+@Configuration
+public class SpringSecurityConfig extends WebSecurityConfigurerAdapter{
+	
+    @Autowired
+    private UserService userService;
+    
+    /**
+    自定义权限认证器，此方法来自于 GlobalAuthenticationConfigurerAdapter 也就是
+    SecurityConfigurer的子类，用来构建和认证权限相关的配置
+    **/
+    @Overriede
+    protected void configure(AuthenticationManagerBuildr auth) throws Exception
+    {
+        //这里我们调用默认的内存权限认证，随便设置几个值
+       /* auth.inMemoryAuthentication().withUser("pop").password("{noop}123")//不加密
+            .roles("USER");//随便赋予了一个权限字符*/
+        auth.userDetailsService(userService);
+    }
+    
+    /**
+    自定义过滤器连，这个来自于securityBuilder，用来构造自己过滤器链
+    */
+    protected void configure(HttpSecurity http) throws Exception{
+        super.configure(http);//保持原样
+    }
+    
+}
+```
+
+##### 自定义加密处理
+
+之前我们有说过`PasswordEncoder`这个接口，他会根据你传过来密码的前缀来选择不同的加密密码的策略实现，例如`{noop}123`就是使用不加密的加密策略。以下是目前`SpringSecurity`支持的加密策略。
+
+![image-20210329153125602](./img/image-20210329153125602.png)
+
+这里我们用`BcryptPasswordEncoder`来加密。
+
+![image-20210330164628919](./img/image-20210330164628919.png)
+
+这个加密的用处在于，每次都会生成一个随机的salt，同一个明文密码多次编码得到的密文其实是不一样的。
+
+```java
+public static void main(String[] args)
+{
+    BCryptPasswordEncoder bCrypt = new BCryptPasswordEncoder();
+    String password = "123456";
+    System.out.println(bCrypt.encode(password));
+    System.out.println(bCrypt.encode(password));   
+    System.out.println(bCrypt.encode(password));   
+    System.out.println(bCrypt.encode(password));  
+}
+```
+
+输出的密文。
+
+![image-20210330165114327](./img/image-20210330165114327.png)
+
+![image-20210330165515796](./img/image-20210330165515796.png)
+
+那么，如果注册用户的话，将这个密码存进去就好了，之后会比对。
+
+![image-20210330165702525](./img/image-20210330165702525.png)
+
+当然，按照源码，如果你没有设置密码加密类，他会根据前缀判断，如果有就会使用设置的。
+
+![image-20210329152914615](./img/image-20210329152914615.png)
+
+```java
+@Configuration
+public class SpringSecurityConfig extends WebSecurityConfigurerAdapter{
+	
+    @Autowired
+    private UserService userService;
+    
+    /**
+    自定义权限认证器，此方法来自于 GlobalAuthenticationConfigurerAdapter 也就是
+    SecurityConfigurer的子类，用来构建和认证权限相关的配置
+    **/
+    @Overriede
+    protected void configure(AuthenticationManagerBuildr auth) throws Exception
+    {
+        //这里我们调用默认的内存权限认证，随便设置几个值
+       /* auth.inMemoryAuthentication().withUser("pop").password("{noop}123")//不加密
+            .roles("USER");//随便赋予了一个权限字符*/
+        auth.userDetailsService(userService).passwordEncoder(new BCryptPasswordEncoder);
+    }
+    
+    /**
+    自定义过滤器连，这个来自于securityBuilder，用来构造自己过滤器链
+    */
+    protected void configure(HttpSecurity http) throws Exception{
+        super.configure(http);//保持原样
+    }
+    
+}
+```
+
+其实，看到这里，你也可以自己实现他的`PasswordEncoder`的接口，自定义自己的加密工具，也是完全可以的。
+
+##### 用户的认证状态
+
+`SpringSecurity`中的所定义的`User`，含有多种状态，包括是否可用，是否超时，是否冻结，是否锁定等。
+
+![image-20210330170430450](./img/image-20210330170430450.png)
+
+User对象的属性中是定义了各种状态的对应关系。
+
+| 参数                          | 说明         |
+| ----------------------------- | ------------ |
+| boolean enabled               | 是否可用     |
+| boolean accountNonExpired     | 账号是否失效 |
+| boolean credentialsNonExpired | 密匙是否失效 |
+| boolean accountNonLocked      | 账号是否锁定 |
+
+所以这里就留给我们一定的遐想攻坚，在我们通过自定义的`UserDetailService`的时候，实现`loadUserByUsername`的时候，通过某种我们自己的在数据库字段定义，又或者校验，完整这些参数的初始化，从让`springsecurity`配合我们完成这些校验等。
+
+![image-20210330170916453](./img/image-20210330170916453.png)
+
+实际页面返回的效果。
+
+![image-20210330170953658](./img/image-20210330170953658.png)
+
+##### 自定义认证页面
+
+当然，如果登录页面无法自定义的话，那也是不行的，我们引入`Thymeleaf`来实现，当然这只是一案例而已，如果你不喜欢可以不用`thymeleaf`。
+
+```xml
+<dependency>
+	<groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-thymeleaf</artifactId>
+</dependency>
+```
+
+登录页面
+
+```html
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:th="http://www.thymeleaf.org">
+    <head>
+        <meta charset="utf-8">
+        <title>title</title>
+    </head>
+    <body>
+        <h1>
+            登录管理
+        </h1>
+        <form th:action="@{/login.do}" method="post">
+            账号:<input type="text" name="username"><br/>
+            密码:<input type="password" name="password"><br/>
+            <input type="submit" value="登录"><br/>
+        </form>
+    </body>
+</html>
+```
+
+同时，我们需要在SpringSecurity中改掉一些默认的配置。
+
+```java
+@Override
+protected void configure(HttpSecurity http) throws Exception{
+//    super.configure(http); 不再调用父类中的方法，使用默认的过滤器链，而是使用我们自定义的。
+    http.authorizeRequests()
+        // 对于登录请求，失败请求，放过
+        .antMatchers("/login","/failure.html").permitAll()//放过
+        .anyRequest().authenticated() // 除此之外的全部请求，都需要验证
+        .and()
+        .formLogin()//认证表单
+        .loginPage("/login")//自定义的认证界面
+        .usernameParameter("username")
+        .passwordParameter("password")
+        .loginProcessingUrl("/login.do")
+        // 认证成功的跳转页面，默认是get方式提交，自定义的成功页面后会post方式提叫，在controller中处理需要注意
+        .defaultSucessUrl("/home")//成功后跳转
+        .failureUrl("/failure") // 失败的跳转
+        .permitAll()
+        .and()
+        .logout()
+        .logoutUrl("/logout")
+        .invalidateHttpSession(true)//注销会话
+        .logoutSuccessUrl("/login")//注销成功后跳转页面
+        .permitAll();
+}
+```
+
+#### CSRF 跨域攻击
+
+##### CSRF介绍
+
+CSRF（Cross-site request forgery）伪站请求伪造，也被称呼为`One Click Attack` 或者 `Session Riding`，通常缩写为CSRF或者XSRF，是对网站的一种恶意利用。
+
+![1617109983543](./img/1617109983543.png)
+
+首先我们知道，我们自己通过输入帐号和密码的方式在成功登陆一个网站后，是可以浏览和使用这个网站的功能的，这是毋庸置疑，对于服务端来说，在我们登陆后，他会将我们的信息加密放入使用set-Cookie的方式，将信息通过浏览器写到我们客户端的cookie中，同时也许服务端也会将一部分信息存储到session中。等到我们再次访问，服务器会从cookie中获取我们的信息来确定是我们本人来访问。
+
+CSRF攻击关键点则是借助**我们的手来完成对我们自己的攻击，让我们不知不觉受到损失**。
+
+![1617110526422](./img/1617110526422.png)
+
+就比如，你在浏览银行网站的时候，这个时候，你又打开了其它的tab页，由于你当前是登陆状态，session和cookie都没有过期的情况下，实际上你对网站的所有请求，网站都会认为是你的正常操作。
+
+这个时候你打开的tab页面弹出了一个你感兴趣的东西，可能是一张图片，你很好奇的点进去，这个时候，图片中也许隐藏了一段含有攻击的代码，这段代码也许是以你的信息想黑客希望的账户转钱的一个请求，这个其实很容易实现，你只需要。
+
+```html
+<img scr="感兴趣的图片.png" onClick="attakCode()"/>
+
+<script>
+    function attakCode(){
+        window.open("www.blank.com/转账给小黑的请求");
+    }
+</script>
+```
+
+当你点击了这个图片后，他会执行一段转账的代码。
+
+```
+www.blank.com/转账给小黑的请求
+```
+
+由于你此刻确实是登陆的状态，所以对于银行网站来说，这个请求是你点击的，也确实是你自己发送出去的，所以他就会按照请求内容，转账给小黑。
+
+##### 常用的解决方案
+
+> 验证Http Referer 字段
+
+根据HTTP协议，在HTTP头中，有一个字段叫做Referer，他记录了HTTP请求的来源地址。
+
+![1617111178376](./img/1617111178376.png)
+
+也就意味着客户端请求来源，如果是本网站的则响应，否则不响应，但是。
+
+* 对于某些浏览器，比如IE6或FF2，目前已经有一些方法可以篡改Referer的值
+* 用户自己可以设置浏览器使其在发送请求时不再提供Referer
+
+> 使用Token解决
+
+token的技术可以说是web有关权限验证的万精油了。由于token必须符合服务器所颁发的这一要求，也就意味着只有符合服务器规则的token才可以被允许通过。也就是防伪标志。
+
+![1617111532969](./img/1617111532969.png)
+
+这个token的值必须是随机的。由于Token的存在，攻击者无法再构造一个带有合法Token的请求实施CSRF攻击。另外使用Token时应注意Token的保密性，尽量将敏感操作由GET改成POST，以form或者AJAX形式提交，避免Token泄露。
+
+##### SpringSecurity 中的处理
+
+我们回到之前的配置类，只需要加上上面这句话。
+
+```java
+ .invalidateHttpSession(true)//注销会话
+                .logoutSuccessUrl("/login")//注销成功后跳转页面
+                .permitAll()
+                .and()
+                .csrf();
+//如果希望禁用
+ .invalidateHttpSession(true)//注销会话
+                .logoutSuccessUrl("/login")//注销成功后跳转页面
+                .permitAll()
+                .and()
+                .csrf()
+     			.disable();
+```
+
+![1617111887319](./img/1617111887319.png)
+
+从配置中移除，也就意味着不会再生成这个过滤器了。
+
+首先，我们这里使用的是thymeleaf的，所以当你开启了csrf的时候，他会在你的登录表单里塞入一个`_csrf`的隐藏域，这很好理解，因为模版引擎会先静态资源读取到内存中，再写到response中，这个期间，自然是可以对静态资源**为所欲为**，加一个简单的字段也是不成问题的。
+
+![1617112369502](./img/1617112369502.png)
+
+![1617112174948](./img/1617112174948.png)
+
+如果你把他关掉了`disable`，自然就没有了。因为他会将他从列表中剔除。
+
+![1617112243920](./img/1617112243920.png)
+
+我们再看看页面。
+
+![1617112308268](./img/1617112308268.png)
+
+那么很明显，我们可以从`CsrfFilter`入手。
+
+```java
+protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) throws ServletException, IOException {
+    	//将响应设置到request的属性中
+        request.setAttribute(HttpServletResponse.class.getName(), response);
+    	// 获取已经创建的csrfToken对象，这个里tokenRespository可以自己定义。
+        CsrfToken csrfToken = this.tokenRepository.loadToken(request);
+       //...
+```
+
+![1617112824104](./img/1617112824104.png)
+
+我们可以随便看一个实现。例如`CookieCsrfTokenRepository`
+
+```java
+public final class CookieCsrfTokenRepository implements CsrfTokenRepository {
+    // 从cookie中获得地参数名
+    static final String DEFAULT_CSRF_COOKIE_NAME = "XSRF-TOKEN";
+    // 从http请求参数里获得参数名
+    static final String DEFAULT_CSRF_PARAMETER_NAME = "_csrf";
+    // 从http header 获得csrftoken的属性名
+    static final String DEFAULT_CSRF_HEADER_NAME = "X-XSRF-TOKEN";
+    private String parameterName = "_csrf";
+    private String headerName = "X-XSRF-TOKEN";
+    private String cookieName = "XSRF-TOKEN";
+    private boolean cookieHttpOnly = true;
+    private String cookiePath;
+    private String cookieDomain;
+    private Boolean secure;
+
+    public CookieCsrfTokenRepository() {
+    }
+	// 封装了一个对象
+    public CsrfToken generateToken(HttpServletRequest request) {
+        							//X-XSRF-TOKEN     _csrf
+        return new DefaultCsrfToken(this.headerName, this.parameterName, 
+                                    // 这里往下翻就会找到内容，其实就是生成了一个uuid
+                                    this.createNewToken());
+    }
+	// 直接就设置了一个cookie返回
+    public void saveToken(CsrfToken token, HttpServletRequest request, HttpServletResponse response) {
+        String tokenValue = token != null ? token.getToken() : "";
+        Cookie cookie = new Cookie(this.cookieName, tokenValue);
+        cookie.setSecure(this.secure != null ? this.secure : request.isSecure());
+        cookie.setPath(StringUtils.hasLength(this.cookiePath) ? this.cookiePath : this.getRequestContext(request));
+        cookie.setMaxAge(token != null ? -1 : 0);
+        cookie.setHttpOnly(this.cookieHttpOnly);
+        if (StringUtils.hasLength(this.cookieDomain)) {
+            cookie.setDomain(this.cookieDomain);
+        }
+
+        response.addCookie(cookie);
+    }
+
+    public CsrfToken loadToken(HttpServletRequest request) {
+        // 直接从请求中获得带过来的cookie值，获取对应内容，如果没有就返回空
+        Cookie cookie = WebUtils.getCookie(request, this.cookieName);
+        if (cookie == null) {
+            return null;
+        } else {
+            String token = cookie.getValue();
+            //封装成对象返回
+            return !StringUtils.hasLength(token) ? null : new DefaultCsrfToken(this.headerName, this.parameterName, token);
+        }
+    }
+    // ...
+    // 其实生成的就是一个uuid而已
+    private String createNewToken() {
+        return UUID.randomUUID().toString();
+    }
+}
+```
+
+回到csrf验证。
+
+```java
+protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) throws ServletException, IOException {
+        request.setAttribute(HttpServletResponse.class.getName(), response);
+        CsrfToken csrfToken = this.tokenRepository.loadToken(request);
+        boolean missingToken = csrfToken == null;
+        if (missingToken) {
+            //没有找到token就生成一个，放到request的cookie中，方便下次请求携带
+            csrfToken = this.tokenRepository.generateToken(request);
+            //携带。
+            this.tokenRepository.saveToken(csrfToken, request, response);
+        }
+
+        request.setAttribute(CsrfToken.class.getName(), csrfToken);
+    	// _csrf
+        request.setAttribute(csrfToken.getParameterName(), csrfToken);
+    	// 是否匹配规则
+        if (!this.requireCsrfProtectionMatcher.matches(request)) {
+            if (this.logger.isTraceEnabled()) {
+                this.logger.trace("Did not protect against CSRF since request did not match " + this.requireCsrfProtectionMatcher);
+            }
+			// 不匹配就放行
+            filterChain.doFilter(request, response);
+        } else {
+            // 从请求头获得token
+            String actualToken = request.getHeader(csrfToken.getHeaderName());
+            // 头没拿到，就去请求参数去拿
+            if (actualToken == null) {
+                actualToken = request.getParameter(csrfToken.getParameterName());
+            }
+			//如果拿到的相同，就放心，否则报错。
+            if (!equalsConstantTime(csrfToken.getToken(), actualToken)) {
+                this.logger.debug(LogMessage.of(() -> {
+                    return "Invalid CSRF token found for " + UrlUtils.buildFullRequestUrl(request);
+                }));
+                AccessDeniedException exception = !missingToken ? new InvalidCsrfTokenException(csrfToken, actualToken) : new MissingCsrfTokenException(actualToken);
+                this.accessDeniedHandler.handle(request, response, (AccessDeniedException)exception);
+            } else {
+                // 符合，放行。
+                filterChain.doFilter(request, response);
+            }
+        }
+    }
+
+
+// 符合csrf的过滤请求规则
+ private static final class DefaultRequiresCsrfMatcher implements RequestMatcher {
+        private final HashSet<String> allowedMethods;
+
+        private DefaultRequiresCsrfMatcher() {
+            this.allowedMethods = new HashSet(Arrays.asList("GET", "HEAD", "TRACE", "OPTIONS"));
+        }
+		// 只要符合上述的几个请求类型，就要进入csrf的流程。
+        public boolean matches(HttpServletRequest request) {
+            return !this.allowedMethods.contains(request.getMethod());
+        }
+```
+
+当然这个是我们在单体架构中实现的csrf跨域攻击的防护，那如果我们是在前后端分离的项目中呢？这 个时候我们是可以将token信息保存在Http协议的Head中的， 浏览器索要登录页面的时候，服务器生成一个随机的csrf_token，放入cookie中。 
+
+```
+Set-Cookie: Csrf-token=i8XNjC4b8KVok4uw5RftR38Wgp2BFwql; .....
+```
+
+浏览器通过JavaScript读取cookie中的Csrf_token，然后在发送请求时作为自定义HTTP头发送回来。
+
+```
+X-Csrf-Token: i8XNjC4b8KVok4uw5RftR38Wgp2BFwql
+```
+
+![1617113798592](./img/1617113798592.png)
+
+服务器读取HTTP头中的Csrf_token，与cookie中的Csrf_token比较，一致则放行，否则拒绝。 这种方法为什么能够防御CSRF攻击呢？ 关键在于JavaScript读取cookie中的Csrf_token这步。由于浏览器的同源策略，攻击者是无法从被 攻击者的cookie中读取任何东西的。所以，攻击者无法成功发起CSRF攻击。
+
+#### remember-me功能
+
+首先，只要登录成功才能进行`remember-me`的功能。
