@@ -1,4 +1,4 @@
-# spring-security
+## Spring Security
 
 ### 写在前面
 
@@ -2744,3 +2744,520 @@ X-Csrf-Token: i8XNjC4b8KVok4uw5RftR38Wgp2BFwql
 #### remember-me功能
 
 首先，只要登录成功才能进行`remember-me`的功能。
+所以，我们应该从`UsernamepasswordAuthenticationFilter`中去分析。
+
+![image-20210331143638603](./img/image-20210331143638603.png)
+
+进入下方的`successfulAuthentication`方法。
+
+```java
+protected void successfulAuthentication(HttpServletRequest request, HttpServletResponse response, FilterChain chain, Authentication authResult) throws IOException, ServletException { 
+    if (this.logger.isDebugEnabled()) { 
+        this.logger.debug("Authentication success. Updating SecurityContextHolder to contain: " + authResult); 
+    }
+SecurityContextHolder.getContext().setAuthentication(authResult); 
+    // remember-me 处理的代码 
+    this.rememberMeServices.loginSuccess(request, response, authResult); 
+    if (this.eventPublisher != null) { 
+        this.eventPublisher.publishEvent(new InteractiveAuthenticationSuccessEvent(authResult, this.getClass())); }
+    this.successHandler.onAuthenticationSuccess(request, response, authResult); 
+}
+```
+
+进入到`AbstractRememberMeServices`的`loginSuccess`的方法中。
+
+```java
+public final void loginSuccess(HttpServletRequest request, HttpServletResponse response, Authentication successfulAuthentication) { 
+    // 判断是否需要使用 Remember-me 
+    if (!this.rememberMeRequested(request, this.parameter)) { 
+        this.logger.debug("Remember-me login not requested.");                           
+    } 
+    else 
+    { // 进行Remember-me的相关设置 
+        this.onLoginSuccess(request, response, successfulAuthentication); 
+    } 
+}
+
+protected boolean rememberMeRequested(HttpServletRequest request, String parameter) { 
+    // 状态是否为true 
+    if (this.alwaysRemember) { 
+        return true; 
+    } else { 
+        // 表单提交的 字段 
+        String paramValue = request.getParameter(parameter); 
+        // 满足条件就返回true 这里有一个重点，那就是在只有你的value值是以下几种的，才是记住我的正确选项
+        if (paramValue != null && (paramValue.equalsIgnoreCase("true") || paramValue.equalsIgnoreCase("on") || paramValue.equalsIgnoreCase("yes") || paramValue.equals("1"))) 
+        { 
+            return true; 
+        } 
+        else { 
+            if (this.logger.isDebugEnabled()) 
+            { this.logger.debug("Did not send remember-me cookie (principal did not set parameter '" + parameter + "')"); 
+            }return false; 
+        } 
+    } 
+}
+// 让我们回到之前的记住我的判断，如果判断通过了，就会进入remember-me的设置
+public final void loginSuccess(HttpServletRequest request, HttpServletResponse response, Authentication successfulAuthentication) { 
+    // 判断是否需要使用 Remember-me 
+    if (!this.rememberMeRequested(request, this.parameter)) { 
+        this.logger.debug("Remember-me login not requested."); 
+    } else 
+    { 
+        // 进行Remember-me的相关设置 进入这里
+        this.onLoginSuccess(request, response, successfulAuthentication); 
+    } 
+}
+```
+
+进入`PersistentTokenBasedTokenBasedRememberMeServices#onLoginSuccess`的方法中。
+
+```java
+protected void onLoginSuccess(HttpServletRequest request, HttpServletResponse response, Authentication successfulAuthentication) { 
+    // 认证成功的账号 
+    String username = successfulAuthentication.getName(); 
+    this.logger.debug("Creating new persistent login for user " + username); 
+    // 封装Remember-me的数据 
+    PersistentRememberMeToken persistentToken = new PersistentRememberMeToken(username, this.generateSeriesData(), this.generateTokenData(), new Date()); 
+    try {
+        // 保存在内存或者持久化到数据库中 可以自行看下两种实现 
+        this.tokenRepository.createNewToken(persistentToken); 
+        // remember-me信息存储到cookie中 
+        this.addCookie(persistentToken, request, response); 
+    } catch (Exception var7) { 
+        this.logger.error("Failed to save persistent token ", var7); 
+    } 
+}
+```
+
+**小结**
+
+通过上面的代码分析我们发现，当认证成功后会判断我们是否勾选了 记住我 按钮，如果勾选了那么会将认证信息封装到对应的token中，同时会将该token信息保存到数据库和cookie中 。
+
+##### remember-me的功能实现
+
+接下来我们看看具体怎么实现`rememberMe`功能表单添加 **记住我** 勾选按钮。
+
+```html
+<!DOCTYPE html> 
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:th="http://www.thymeleaf.org"> <head>
+    <meta charset="UTF-8"> 
+    <title>Title</title> 
+    </head> 
+    <body><h1>登录管理</h1> 
+        <form th:action="@{/login.do}" method="post"> 
+            账号:<input type="text" name="username" id="username"><br> 
+            密码:<input type="password" name="password" id="password"><br> 
+            <!--名字和值一定要固定，value可以是1，也可以是on，也可以是yes，这在源码中我们已经了解到了-->
+            <input type="checkbox" value="1" name="remember-me"> 记住我<br> 
+            <input type="submit" value="登录"><br> 
+        </form> 
+    </body> 
+</html>
+```
+
+同时，保证在配置文件中，确实开放了这个**记住我**的配置。
+
+![image-20210331151137811](./img/image-20210331151137811.png)
+
+`RememberMeAuthenticationFilter`中功能非常简单，会在打开浏览器时，自动判断是否认证，如果没有则 调用`autoLogin`进行自动认证。
+
+```java
+public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
+		throws IOException, ServletException {
+	HttpServletRequest request = (HttpServletRequest) req;
+	HttpServletResponse response = (HttpServletResponse) res;
+ 
+	// 如果SecurityContext里没有包含Authentication对象
+	if (SecurityContextHolder.getContext().getAuthentication() == null) {
+	
+		// 从request里解析出SPRING_SECURITY_REMEMBER_ME_COOKIE的信息, 然后转成一个RememberMeAuthenticationToken对象
+		Authentication rememberMeAuth = rememberMeServices.autoLogin(request, response);
+ 
+		if (rememberMeAuth != null) {
+			// Attempt authenticaton via AuthenticationManager
+			try {
+				// 再判断rememberMeAuth对象里的key值是否与配置文件里的key值相同
+                // 关于一个设置
+				rememberMeAuth = authenticationManager.authenticate(rememberMeAuth);
+ 
+				// Store to SecurityContextHolder
+				SecurityContextHolder.getContext().setAuthentication(rememberMeAuth);
+ 
+				onSuccessfulAuthentication(request, response, rememberMeAuth);
+ 
+				if (logger.isDebugEnabled()) {
+					logger.debug("SecurityContextHolder populated with remember-me token: '"
+						+ SecurityContextHolder.getContext().getAuthentication() + "'");
+				}
+ 
+				// Fire event
+				if (this.eventPublisher != null) {
+					eventPublisher.publishEvent(new InteractiveAuthenticationSuccessEvent(
+							SecurityContextHolder.getContext().getAuthentication(), this.getClass()));
+				}
+ 
+				if (successHandler != null) {
+					successHandler.onAuthenticationSuccess(request, response, rememberMeAuth);
+ 
+					return;
+				}
+ 
+			} catch (AuthenticationException authenticationException) {
+				if (logger.isDebugEnabled()) {
+					logger.debug("SecurityContextHolder not populated with remember-me token, as "
+							+ "AuthenticationManager rejected Authentication returned by RememberMeServices: '"
+							+ rememberMeAuth + "'; invalidating remember-me token", authenticationException);
+				}
+ 
+				rememberMeServices.loginFail(request, response);
+ 
+				onUnsuccessfulAuthentication(request, response, authenticationException);
+			}
+		}
+ 
+		chain.doFilter(request, response);
+	} else {
+		if (logger.isDebugEnabled()) {
+			logger.debug("SecurityContextHolder not populated with remember-me token, as it already contained: '"
+				+ SecurityContextHolder.getContext().getAuthentication() + "'");
+		}
+ 
+		chain.doFilter(request, response);
+	}
+}
+```
+
+由于我们将用户的账号和密码信息以及权限加密存储到了token中，作为`rememberme`的值存在了客户端的cookie中，所以当用户请求的时候，请求会携带cookie信息，`RememberMeAuthenticationFilter`过滤器在获取内容的时候，取出这里的内容，初始化到权限容器中，完整登录。
+
+登陆成功的时候服务端返回的cookie信息。
+
+![image-20210331153531951](./img/image-20210331153531951.png)
+
+关闭浏览器第二次访问，携带的cookie信息。
+
+![image-20210331153551383](./img/image-20210331153551383.png)
+
+不过这需要注意的是，这个加密是可逆的，也就是对称加密，要保证服务端确实可以将信息解密出来。
+
+**记住我**功能方便是大家看得见的，但是安全性却令人担忧。因为Cookie毕竟是保存在客户端的，很容易盗取，而且 cookie的值还与用户名、密码这些敏感数据相关，虽然加密了，但是将敏感信息存在客户端，还是不太安全。那么这就要提醒喜欢使用此功能的，用完网站要及时手动退出登录，清空认证信息。
+
+  此外，`SpringSecurity`还提供了`remember me`的另一种相对更安全的实现机制 :在客户端的cookie
+
+中，仅保存一个**无意义**的加密串（与用户名、密码等敏感数据无关），然后在db中保存该加密串-用户信
+
+息的对应关系，自动登录 时，用cookie中的加密串，到db中验证，如果通过，自动登录才算通过。
+
+创建一张表，注意这张表的名称和字段都是固定的，**不要修改**。
+
+```sql
+CREATE TABLE `persistent_logins` ( 
+    `username` VARCHAR (64) NOT NULL, 
+    `series` VARCHAR (64) NOT NULL, 
+    `token` VARCHAR (64) NOT NULL, 
+    `last_used` TIMESTAMP NOT NULL, 
+    PRIMARY KEY (`series`) 
+) ENGINE = INNODB DEFAULT CHARSET = utf8
+```
+
+其实在`JdbcTokenRepositoryImpl`中，已经帮我们定义好的语句。
+
+![image-20210331154717404](./img/image-20210331154717404.png)
+
+依赖
+
+```xml
+<!-- 引入jdbc支持 --> 
+<dependency> 
+    <groupId>org.springframework.boot</groupId> 
+    <artifactId>spring-boot-starter-jdbc</artifactId> 
+</dependency> 
+<dependency> 
+    <groupId>mysql</groupId> 
+    <artifactId>mysql-connector-java</artifactId> 
+    <version>8.0.15</version> 
+</dependency>
+```
+
+相关配置
+
+```properties
+spring.datasource.username=root 
+spring.datasource.password=123456 
+spring.datasource.url=jdbc:mysql://localhost:3306/ssm? serverTimezone=GMT%2B8&useSSL=false 
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+```
+
+在配置文件中的配置。
+
+```java
+@Configuration 
+public class SpringSecurityConfig extends WebSecurityConfigurerAdapter { 
+    @Autowired private UserService userService; 
+    @Autowired private DataSource dataSource; 
+    @Autowired private PersistentTokenRepository persistentTokenRepository; 
+    /*** 自定义认证管理器 * @param auth * @throws Exception */ 
+    @Override 
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception { /*auth.inMemoryAuthentication() .withUser("zhang") .password("{noop}111") .roles("USER");*/ 
+        auth.userDetailsService(userService).passwordEncoder(new BCryptPasswordEncoder()); 
+    }
+    /*** 自定义过滤器链 * @param http * @throws Exception */ 
+    @Override protected void configure(HttpSecurity http) throws Exception { 
+        // 调用父类中的方法 使用默认的过滤器链 
+        // super.configure(http); 
+        http.authorizeRequests() 
+            .antMatchers("/login","/failure.html").permitAll() // 放过 login.html 
+            .anyRequest() .authenticated() // 都需要认证 .and().formLogin() // 认证表单 
+            .loginPage("/login") // 自定义的认证界面 .usernameParameter("username") 
+            .passwordParameter("password") loginProcessingUrl("/login.do") // 认证成功的跳转页面 默认是get方式提交 自定义的成功页面后会post方式提要 // 在Controller中处理的时候要注意 
+            .successForwardUrl("/home") // 这个是post方式 //
+            .defaultSuccessUrl("/home") // 这个是get方式 
+            .failureUrl("/failure") // 失败的页面 
+            .permitAll() 
+            .and()
+            .logout()
+            .logoutUrl("/logout") 
+            .invalidateHttpSession(true) // 注销会话 
+            .logoutSuccessUrl("/login") // 注销成功后的跳转页面 
+            .permitAll() 
+            .and().rememberMe() 
+            .tokenRepository(persistentTokenRepository) /*.and() .csrf() .disable()*/;
+        // 单用户登录，如果有一个登录了，同一个用户在其他地方不能登录 // http.sessionManagement().maximumSessions(1).maxSessionsPreventsLogin(true); 
+        http.sessionManagement().maximumSessions(1).expiredSessionStrategy(expiredSessi onStrategy()); 
+    }/*** 持久化token ** Security中，默认是使用PersistentTokenRepository的子类 InMemoryTokenRepositoryImpl，将token放在内存中 * 如果使用JdbcTokenRepositoryImpl，会创建表persistent_logins，将token持久化到数据 库 */ 
+    @Bean 
+    public PersistentTokenRepository persistentTokenRepository(){ 
+        JdbcTokenRepositoryImpl tokenRepository = new JdbcTokenRepositoryImpl(); 
+        tokenRepository.setDataSource(dataSource); // tokenRepository.setCreateTableOnStartup(true); // 第一次创建表结构 执行后 注销掉 
+        return tokenRepository; 
+    }
+    
+    // 定义session过期后的服务器做什么反应，这里就是直接进行登出操作。
+    @Bean 
+    public SessionInformationExpiredStrategy expiredSessionStrategy() { 
+        return new SimpleRedirectSessionInformationExpiredStrategy("/logout"); 
+    } 
+}
+```
+
+![image-20210331155741984](./img/image-20210331155741984.png)
+
+然后我们再次登陆测试看看首次登陆成功，响应的cookie信息。
+
+![image-20210331155821963](./img/image-20210331155821963.png)
+
+数据库表结构存储的信息。
+
+![image-20210331155850021](./img/image-20210331155850021.png)
+
+我们可以看到，`JdbcTokenRepositoryImpl`里的做法，是拿出一段没有意义的字符串进行加密，返回给cookie，然后，在下次请求的时候，会携带这个加密的无意义的串，让`JdbcTokenRepositoryImpl`去数据库核对，无意义的字符串作为主键，去数据库查询获得真正的token，将token解密出来获得用户信息，这样就比直接存储用户的加密信息要来的安全一些。
+
+##### 如何获得当前登录信息。
+
+在**服务端代码**中我们可以通过`SecurityContextHolder`来获取
+
+```java
+@GetMapping("/test") @ResponseBody public String test(){ 
+    // SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+    //可以获得当前用户的权限和用户信息
+    return "test:"+ SecurityContextHolder.getContext().getAuthentication().getPrincipal(); 
+}
+```
+
+![image-20210331160718733](./img/image-20210331160718733.png)
+
+在**前端代码**中，我们可以使用`Thymeleaf`，由于`Thymeleaf`对`SpringSecurity`提供了支持。
+
+https://github.com/thymeleaf/thymeleaf-extras-springsecurity
+
+依赖
+
+```xml
+<dependency> 
+    <groupId>org.thymeleaf.extras</groupId> 
+    <artifactId>thymeleaf-extras-springsecurity5</artifactId> 	
+    <version>3.0.4.RELEASE</version> 
+</dependency>
+```
+
+页面中使用。
+
+```html
+<!DOCTYPE html> 
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:th="http://www.thymeleaf.org" xmlns:sec="http://www.thymeleaf.org/extras/spring-security"> 
+    <head><meta charset="UTF-8"> 
+        <title>Title</title> 
+    </head> 
+    <body>
+        <h1>欢迎页面</h1> 
+        登录名：<span sec:authentication="name"></span><br> 
+        角色：<span sec:authentication="principal.authorities"></span><br> 
+        用户名：<span sec:authentication="principal.username"></span><br> 
+        密码：<span sec:authentication="principal.password"></span><br> 
+    </body> 
+</html>
+```
+
+登录后，访问页面的效果。
+
+![image-20210331161340597](./img/image-20210331161340597.png)
+
+#### 授权操作
+
+权限管理的两大核心是：认证和授权，前面我们已经介绍完了认证的内容，接下来就看下授权的操作。
+
+**注意**：在用户认证的时候我们会保存用户所具有的所有的权限。
+
+> URL权限配置
+
+我们在配置`HttpSecurity`的时候是可以针对特定的URL做出授权操作的，具体如下：
+
+```java
+@RestController 
+public class OrderController { 
+    @RequestMapping("/order/order1")
+    public String order1(){
+        return "order1 ...."; 
+    }
+    @RequestMapping("/order/order2") 
+    public String order2(){ 
+        return "order2 ...."; 
+    }
+    @RequestMapping("/order/order3") 
+    public String order3(){ 
+        return "order3 ...."; 
+    } 
+}
+```
+
+对应配置类的设置，配置URL权限。
+
+![image-20210331163616196](./img/image-20210331163616196.png)
+
+登陆的账号具有 **ROLE_USER** 角色 所以
+
+http://localhost:8080/order/order1会放过。
+
+![image-20210331163732597](./img/image-20210331163732597.png)
+
+http://localhost:8080/order/order2会被拦截
+
+![image-20210331163820998](./img/image-20210331163820998.png)
+
+这个针对特定的URL的授权只能针对特定的一些URL去处理，更细话的是针对不同的场景可以情况不一样，这时我们可以通过方法级别的授权来控制如下。
+
+**注意**：在权限验证的时候会判断用户具有的角色是否添加的有"ROLE_"前缀，所以我们在授权的角色会添加这个前缀，后面我们会在源码阶段给大家详细分析。
+
+![image-20210331163924817](./img/image-20210331163924817.png)
+
+在`SpringSecurity`中开启权限注解的方式有三种，这三种我们都看下，实际开发中用一种即可
+
+```java
+@Configuration 
+@EnableWebSecurity 
+@EnableGlobalMethodSecurity(prePostEnabled = true) // 表示支持spring表达式注解 //@EnableGlobalMethodSecurity(jsr250Enabled = true) // 示支持jsr250-api的注解 //@EnableGlobalMethodSecurity(securedEnabled = true) // 这才是SpringSecurity提供的 注解
+public class SpringSecurityConfig extends WebSecurityConfigurerAdapter
+```
+
+**Spring表达式注解使用**
+
+```java
+public class UserController { 
+    @PreAuthorize(value = "hasRole('USER')") 
+    @GetMapping("/query1") 
+    public String query1(){ 
+        System.out.println("query1 ...."); 
+        return "/home"; 
+    }
+    @PreAuthorize(value = "hasRole('ROOT')") 
+    @GetMapping("/query2") 
+    public String query2(){ 
+        System.out.println("query2 ...."); 
+        return "/home"; 
+    }
+    @PreAuthorize(value = "hasRole('ROOT') OR hasRole('USER')") 
+    @GetMapping("/query3") 
+    public String query3(){ 
+        System.out.println("query3 ....");
+        return "/home"; 
+    } 
+}
+```
+
+**Jsr250注解的使用**
+
+![image-20210331164436242](./img/image-20210331164436242.png)
+
+```java
+@RestController public class PersonController { 
+    @RolesAllowed({"USER"}) 
+    @RequestMapping("/hello1") 
+    public String hello1(){ 
+        return "hello1 ..."; 
+        // 具有权限 
+    }
+    @RolesAllowed({"ROOT"}) 
+    @RequestMapping("/hello2") 
+    public String hello2(){ 
+        return "hello2 ..."; 
+        // 没有权限 
+    }
+    @RequestMapping("/hello3") 
+    public String hello3(){ 
+        return "hello3 ..."; 
+    } 
+}
+```
+
+**SpringSecurity提供的注解使用**
+
+![image-20210331164538694](./img/image-20210331164538694.png)
+
+```java
+@RestController public class MenuController { 
+    @Secured({"ROLE_USER"}) 
+    @RequestMapping("/fun1") 
+    public String fun1(){ 
+        return "fun1 ..."; 
+        // 可以访问 
+    }
+    @Secured({"ROLE_ROOT"}) 
+    @RequestMapping("/fun2") 
+    public String fun2(){ 
+        return "fun2 ..."; 
+        // 不能访问 
+    }
+    @RequestMapping("/fun3") 
+    public String fun3(){ 
+        return "fun3 ..."; 
+    } 
+}
+```
+
+> 模板中的授权
+
+在具体的页面模板中如果我们想要实现更加细粒度的管理，在Thymeleaf中我们同样可以利用前面使用的Thymeleaf提供的扩展标签来实现。
+
+```html
+<!DOCTYPE html> <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:th="http://www.thymeleaf.org" xmlns:sec="http://www.thymeleaf.org/extras/spring-security"> 
+    <head>
+        <meta charset="UTF-8"> 
+        <title>Title</title> 
+    </head> 
+    <body>
+        <h1>欢迎页面</h1> 
+        登录名：<span sec:authentication="name"></span><br> 
+        角色：<span sec:authentication="principal.authorities"></span><br> 
+        用户名：<span sec:authentication="principal.username"></span><br> 
+        密码：<span sec:authentication="principal.password"></span><br>
+<span sec:authorize="isAuthenticated()">
+    已登陆<br> <span sec:authorize="hasRole('USER')"> 
+    <a href="#">用户管理</a> </span><br> <span sec:authorize="hasRole('ROOT')"> 
+    <a href="#">角色管理</a> </span><br> <span sec:authorize="hasRole('USER')"> 
+    <a href="#">权限管理</a> </span><br> <span sec:authorize="hasRole('ROOT')"> 
+    <a href="#">菜单管理</a> </span><br> </span>
+    </body> 
+</html>
+```
+
+![image-20210331164739127](./img/image-20210331164739127.png)
