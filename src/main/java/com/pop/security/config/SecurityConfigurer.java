@@ -21,6 +21,7 @@ public class SecurityConfigurer extends WebSecurityConfigurerAdapter {
         //    super.configure(http); 不再调用父类中的方法，使用默认的过滤器链，而是使用我们自定义的。
         http.authorizeRequests()
                 // 对于登录请求，失败请求，放过
+                .antMatchers("/none").hasAnyRole("USER")
                 .antMatchers("/login","/failure.html").permitAll()//放过
                 .anyRequest().authenticated() // 除此之外的全部请求，都需要验证
                 .and()

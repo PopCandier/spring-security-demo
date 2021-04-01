@@ -2297,7 +2297,7 @@ public class UserServiceImpl implements UserService {
         //保存权限的集合，其实就是一串封装起来的代表权限的字符串
         List<SimpleGrantedAuthority> list = new ArrayList<>();
         // 这里也建议从 数据库或者内存中获取权限的代码，然后封装返回
-        list.add(new SimpleGantedAuthority("USER"));
+        list.add(new SimpleGantedAuthority("ROLE_USER"));
         //这里是简单的校验
         if(!"lisi".equals(username))
         {
@@ -3136,7 +3136,45 @@ public class OrderController {
 
 登陆的账号具有 **ROLE_USER** 角色 所以
 
-http://localhost:8080/order/order1会放过。
+http://localhost:8080/order/order1会放过。至于为什么这里写的是USER，下面判断的会是ROLE_USER，我们可以点进去看一下
+
+```java
+//ExpressionUrlAuthorizationConfigurer.java
+private static String hasAnyRole(String... authorities) {
+        String anyAuthorities = StringUtils.arrayToDelimitedString(authorities, "','ROLE_");
+        return "hasAnyRole('ROLE_" + anyAuthorities + "')";
+}
+// 因为这里会自动加上ROLE的前缀，所以，我们存数据库的时候，应该保证权限字符有ROLE的前缀
+@Service
+public class UserServiceImpl implements UserService {
+    
+    /*
+     通过用户名查找用户
+    */
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException{
+        
+        // 一段从数据库，或者内存中，通过用户名或者UserDetails的代码
+        // ....
+        // 结束...  UserDetail是Security自己定义的对象实体，按照规范返回即可。
+        
+        //保存权限的集合，其实就是一串封装起来的代表权限的字符串
+        List<SimpleGrantedAuthority> list = new ArrayList<>();
+        // 这里也建议从 数据库或者内存中获取权限的代码，然后封装返回
+        list.add(new SimpleGantedAuthority("ROLE_USER"));
+        //这里是简单的校验
+        if(!"lisi".equals(username))
+        {
+            return null;
+        }
+        //将用户名和密码，权限封装起来
+        UserDetail user = new User("lisi","{noop}123",list);
+        return user;
+    }
+    
+}
+// 如果你希望使用springsecurity这里面的权限判断，那么需要保证你的数据库里存的是ROLE_的前缀字符，但是如果你不希望使用，想要自定义权限的校验，可以自己使用。
+```
 
 ![image-20210331163732597](./img/image-20210331163732597.png)
 
